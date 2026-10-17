@@ -1,3 +1,5 @@
+import { getApiBaseUrl } from "../lib/api-client";
+import { baseUrlForHost } from "../lib/host-clients";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Globe2, Loader2, PanelRight, Plus } from "lucide-react";
 import { useBlocker } from "@tanstack/react-router";
@@ -108,7 +110,7 @@ import {
 	inspectorMaxWidthCss,
 } from "../lib/inspector-width";
 
-type CenterFileOpenRequest = { commitSha?: string; editing: boolean; key: number; line?: number; mode: FileViewMode; scope?: FileOpenOptions["scope"] };
+type CenterFileOpenRequest = { source?: FileOpenOptions["source"]; annotationRange?: FileOpenOptions["annotationRange"]; commitSha?: string; editing: boolean; key: number; line?: number; mode: FileViewMode; scope?: FileOpenOptions["scope"] };
 const EMPTY_AUXILIARY_TAB_ORDER: string[] = [];
 // Centre-file open requests take keys from this process-wide counter, not a
 // per-mount one: the display mode remembered for a request (ui-store) outlives a
@@ -1024,6 +1026,8 @@ export function SessionView({ sessionId, cloudOrgId, projectId, hostId }: Sessio
 					...sessionRequests,
 					[path]: {
 						commitSha: options?.commitSha,
+						source: options?.source,
+						annotationRange: options?.annotationRange ? {...options.annotationRange,requestKey:key}:undefined,
 						editing: options?.editing ?? false,
 						key,
 						line: options?.line,
@@ -2020,6 +2024,16 @@ export function SessionView({ sessionId, cloudOrgId, projectId, hostId }: Sessio
 									}
 									onOpenFiles={browserOnly ? undefined : handleOpenFiles}
 									onOpenFile={handleOpenFile}
+         onOpenFileAnnotation={(reference,resolution)=>{
+          if(reference.sessionId!==sessionId)return;
+          const path=resolution.path??reference.path;
+          const source: NonNullable<FileOpenOptions["source"]> = reference.source.kind==="pull_request"
+           ? {kind:"pull_request",number:reference.source.number!,url:reference.source.url??"",label:`PR #${reference.source.number}`,snapshot:reference.source.snapshot}
+           : reference.source.kind==="artifact"
+           ? {kind:"artifact",rawUrl:`${(hostId?baseUrlForHost(hostId):getApiBaseUrl())}/api/v1/sessions/${encodeURIComponent(sessionId)}/artifact-files/${path.split("/").map(encodeURIComponent).join("/")}?raw=true`}
+           : {kind:"workspace"};
+          openCenterFile(path,{source,commitSha:reference.commitSha,scope:reference.scope as FileOpenOptions["scope"],mode:reference.side==="file"?"file":"diff",annotationRange:{...reference,line:resolution.line??reference.line,endLine:resolution.endLine??reference.endLine,requestKey:0}});
+         }}
 									onOpenLinkInBrowser={browserView.openLink}
 								/>
 								{reviewerChatId ? (
@@ -2080,7 +2094,7 @@ export function SessionView({ sessionId, cloudOrgId, projectId, hostId }: Sessio
 							split={filesSplit}
 						/>
 									) : (
-										<SessionFileWorkspace
+										<SessionFileWorkspace source={activeCenterFileRequest?.source} annotationRange={activeCenterFileRequest?.annotationRange}
 											hostId={hostId}
 											annotation={fileAnnotation}
 											commitSha={activeCenterFileRequest?.commitSha}

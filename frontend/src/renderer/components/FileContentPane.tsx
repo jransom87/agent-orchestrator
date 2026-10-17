@@ -1,3 +1,4 @@
+import type { FileAnnotationRange } from "../../shared/chat-file-reference";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -53,7 +54,7 @@ import { isSvgPath } from "../lib/image-files";
 const EDIT_ACTION_CLASS = "h-6 gap-1 px-2 text-xs";
 
 export type FileViewMode = FileDisplayMode;
-export type FileOpenOptions = { commitSha?: string; editing?: boolean; line?: number; mode?: FileViewMode; scope?: WorkspaceDiffScope };
+export type FileOpenOptions = { annotationRange?: FileAnnotationRange; source?: FilesSource; commitSha?: string; editing?: boolean; line?: number; mode?: FileViewMode; scope?: WorkspaceDiffScope };
 
 const DEFAULT_FILES_SOURCE: FilesSource = { kind: "workspace" };
 
@@ -72,6 +73,7 @@ export function FileContentPane({
 	annotation,
 	initialEditing = false,
 	initialLine,
+	annotationRange,
 	initialMode = "diff",
 	initialRequestKey = 0,
 	commitSha,
@@ -91,6 +93,7 @@ export function FileContentPane({
 	annotation: FileAnnotationModel;
 	initialEditing?: boolean;
 	initialLine?: number;
+	annotationRange?: FileAnnotationRange;
 	initialMode?: FileViewMode;
 	initialRequestKey?: number;
 	commitSha?: string;
@@ -281,7 +284,7 @@ export function FileContentPane({
 				<WorkspaceEntryIcon className="size-icon-base" kind="file" name={path.split("/").pop() ?? path} />
 				<span className="truncate">{path}</span>
 			</div>
-			<ReadOnlyFileView source={source} commitSha={commitSha} annotation={{ ...annotation, begin: () => {} }} detail={preview} sessionId={sessionId} hostId={hostId} scope={scope} onContentReady={onContentReady} revealLine={initialLine ? { line: initialLine, requestKey: initialRequestKey } : undefined} onRevealLineConsumed={onInitialLineConsumed} />
+			<ReadOnlyFileView annotationRange={annotationRange} source={source} commitSha={commitSha} annotation={{ ...annotation, begin: () => {} }} detail={preview} sessionId={sessionId} hostId={hostId} scope={scope} onContentReady={onContentReady} revealLine={initialLine ? { line: initialLine, requestKey: initialRequestKey } : undefined} onRevealLineConsumed={onInitialLineConsumed} />
 			{query.error ? <PanelMessage action={<RetryButton onClick={() => void refetch()} />}>{query.error.message}</PanelMessage> : null}
 		</div>;
 	}
@@ -322,7 +325,7 @@ export function FileContentPane({
 			: mode;
 	const mediaPreview = mediaKind && !editing && effectiveMode === "file";
 	const fileView = (
-		<CompleteFileView
+		<CompleteFileView annotationRange={annotationRange}
 			annotation={newerLiveText ? { ...annotation, begin: () => {} } : annotation}
 			detail={displayDetail}
 			editing={editing && effectiveMode === "file"}
@@ -474,7 +477,7 @@ export function FileContentPane({
 				detailLoadedAt={query.dataUpdatedAt}
 				emptyFallback={
 					!detail.binary && !detail.contentTruncated && !detail.deleted && detail.content ? (
-						<ReadOnlyFileView source={source} commitSha={commitSha} annotation={annotation} detail={detail} hostId={hostId} scope={scope} sessionId={sessionId} />
+						<ReadOnlyFileView annotationRange={annotationRange} source={source} commitSha={commitSha} annotation={annotation} detail={detail} hostId={hostId} scope={scope} sessionId={sessionId} />
 					) : undefined
 				}
 				filePath={path}
@@ -490,7 +493,7 @@ export function FileContentPane({
 				{toolbarNode}
 				<EditProvider createEditor={createReviewEditor}>
 				{effectiveMode === "diff" ? (
-					<AoDiffFile
+					<AoDiffFile annotationRange={annotationRange}
 						annotation={annotation}
 						detail={detail}
 						fallback={fallback}
@@ -538,7 +541,7 @@ function artifactOriginOf(source: FilesSource): string | undefined {
 	}
 }
 
-function CompleteFileView({ annotation, commitSha, detail, editing, markdownEditing = false, mediaKind, onContentReady, onEditChange, onRevealLineConsumed, revealLine, scope, sessionId, hostId, source, version }: { annotation: FileAnnotationModel; commitSha?: string; detail: WorkspaceFileDetail; editing: boolean; markdownEditing?: boolean; mediaKind?: FileMediaKind; onContentReady?: () => void; onEditChange: (content: string) => void; onRevealLineConsumed?: (requestKey: number) => void; revealLine?: { line: number; requestKey: number }; scope: WorkspaceDiffScope; sessionId: string; hostId?: string; source: FilesSource; version: number | string }) {
+function CompleteFileView({ annotationRange, annotation, commitSha, detail, editing, markdownEditing = false, mediaKind, onContentReady, onEditChange, onRevealLineConsumed, revealLine, scope, sessionId, hostId, source, version }: { annotationRange?: FileAnnotationRange; annotation: FileAnnotationModel; commitSha?: string; detail: WorkspaceFileDetail; editing: boolean; markdownEditing?: boolean; mediaKind?: FileMediaKind; onContentReady?: () => void; onEditChange: (content: string) => void; onRevealLineConsumed?: (requestKey: number) => void; revealLine?: { line: number; requestKey: number }; scope: WorkspaceDiffScope; sessionId: string; hostId?: string; source: FilesSource; version: number | string }) {
 	const { t } = useTranslation();
 	const needsRevision = !mediaKind && source.kind !== "artifact" && (detail.deleted || detail.contentTruncated) && !detail.imageMediaType;
 	const revision = useQuery({
@@ -551,7 +554,7 @@ function CompleteFileView({ annotation, commitSha, detail, editing, markdownEdit
 	if (needsRevision && revision.data) {
 		if (!revision.data.exists) return <PanelMessage>{t("files.error.loadFile")}</PanelMessage>;
 		return (
-			<ReadOnlyFileView source={source} commitSha={commitSha}
+			<ReadOnlyFileView annotationRange={annotationRange} source={source} commitSha={commitSha}
 				annotation={annotation}
 				detail={{
 					...detail,
@@ -574,7 +577,7 @@ function CompleteFileView({ annotation, commitSha, detail, editing, markdownEdit
 		);
 	}
 	if (markdownEditing) return <MarkdownEditor filePath={detail.path} onChange={onEditChange} value={detail.content} />;
-	return <ReadOnlyFileView source={source} commitSha={commitSha} annotation={annotation} detail={detail} editing={editing} imageUrl={artifactImageUrl(source, version)} onContentReady={onContentReady} onEditChange={onEditChange} onRevealLineConsumed={onRevealLineConsumed} revealLine={revealLine} scope={scope} sessionId={sessionId} hostId={hostId} />;
+	return <ReadOnlyFileView annotationRange={annotationRange} source={source} commitSha={commitSha} annotation={annotation} detail={detail} editing={editing} imageUrl={artifactImageUrl(source, version)} onContentReady={onContentReady} onEditChange={onEditChange} onRevealLineConsumed={onRevealLineConsumed} revealLine={revealLine} scope={scope} sessionId={sessionId} hostId={hostId} />;
 }
 
 // An artifact image loads from its raw URL. The load time joins the URL so a

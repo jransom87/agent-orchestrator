@@ -1,3 +1,5 @@
+import type { FileAnnotationRange } from "../../shared/chat-file-reference";
+import type { FilesSource } from "../hooks/useSessionWorkspaceFiles";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { FileContentPane } from "./FileContentPane";
 import type { FileAnnotationModel } from "./WorkspaceDiffView";
@@ -10,6 +12,8 @@ export function SessionFileWorkspace({
 	hostId,
 	initialEditing = false,
 	initialLine,
+	annotationRange,
+	source,
 	initialMode = "file",
 	initialRequestKey = 0,
 	onDirtyChange,
@@ -25,6 +29,8 @@ export function SessionFileWorkspace({
 	hostId?: string;
 	initialEditing?: boolean;
 	initialLine?: number;
+	annotationRange?: FileAnnotationRange;
+	source?: FilesSource;
 	initialMode?: FileViewMode;
 	initialRequestKey?: number;
 	onDirtyChange?: (path: string, dirty: boolean) => void;
@@ -94,7 +100,7 @@ export function SessionFileWorkspace({
 				}}
 				ref={scrollRef}
 			>
-				<FileContentPane
+				<FileContentPane annotationRange={annotationRange} source={source}
 					annotation={annotation}
 					commitSha={commitSha}
 					hostId={hostId}

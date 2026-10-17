@@ -1,3 +1,5 @@
+import type { FileAnnotationRange } from "../../shared/chat-file-reference";
+import { useFileAnnotationReveal } from "./diffs/useFileAnnotationReveal";
 import { useCallback, useEffect, useId, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { type FileContents, type LineAnnotation } from "@pierre/diffs";
@@ -32,6 +34,7 @@ function workspaceRawImageUrl(sessionId: string, path: string, side: "before" | 
 // oversized files short-circuit before any tokenization is attempted.
 export function ReadOnlyFileView({
 	annotation,
+	annotationRange,
 	detail,
 	editing = false,
 	onContentReady,
@@ -47,6 +50,7 @@ export function ReadOnlyFileView({
 	side = "after",
 }: {
 	annotation: FileAnnotationModel;
+	annotationRange?: FileAnnotationRange;
 	detail: WorkspaceFileDetail;
 	editing?: boolean;
 	onContentReady?: () => void;
@@ -66,6 +70,7 @@ export function ReadOnlyFileView({
 	const { baseUrl: remoteBaseUrl } = useHostConnection(hostId);
 	const resolvedTheme = useUiStore((state) => state.resolvedTheme);
 	const containerRef = useRef<HTMLDivElement>(null);
+	const annotationReveal=useFileAnnotationReveal(containerRef,editing ? undefined : annotationRange);
 	const pendingRevealRef = useRef(revealLine);
 	const consumedRevealRequestKeysRef = useRef(new Set<number>());
 	const editorInstanceId = useId();
@@ -157,6 +162,7 @@ export function ReadOnlyFileView({
 					ownsVerticalViewport: true,
 				}}
 				file={file}
+				selectedLines={annotationReveal.selectedLines}
 				lineAnnotations={lineAnnotations}
 				options={{
 					disableFileHeader: true,
@@ -166,6 +172,7 @@ export function ReadOnlyFileView({
 						gutterHover.restoreAfterRender();
 						onContentReady?.();
 						revealRequestedLine();
+						annotationReveal.reveal();
 					},
 					overflow: "wrap",
 					theme: { dark: "github-dark", light: "github-light" },
@@ -187,6 +194,7 @@ export function ReadOnlyFileView({
 					}} />
 				)}
 			/>
+			{annotationReveal.changed ? <p role="status" className="px-3 py-2 text-xs text-muted-foreground">{t("chat.fileAnnotationChangedDuringOpen")}</p> : null}
 			<SelectionAskButton onAsk={codeSelection.ask} source={codeSelection.source} />
 		</div>
 	);

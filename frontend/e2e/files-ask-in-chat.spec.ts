@@ -319,6 +319,25 @@ test("a TUI session has no Chat composer, so highlighting offers no Add to chat"
 	await expect(askButton(page)).toHaveCount(0);
 });
 
+test("file annotations show captured code and open a verified selected range", async ({page})=>{
+ const {inspector,composer}=await openChatSession(page);
+ await page.route("**/conversation/file-references/resolve",route=>{
+  const ref=route.request().postDataJSON() as ChatFileReference;
+  return route.fulfill({json:{state:"unchanged",path:ref.path,line:ref.line,endLine:ref.endLine,side:ref.side}});
+ });
+ await inspector.getByRole("button",{name:"Open full file"}).click();
+ await selectText(page,row(page,CENTER,3),row(page,CENTER,4));
+ await askButton(page).getByRole("button",{name:"Add to chat"}).click();
+ await expect(composer).toBeVisible();
+ await page.getByRole("button",{name:"1 annotation"}).click();
+ await expect(page.getByRole("button",{name:"Open selected lines"})).toBeVisible();
+ await expect(page.locator("pre").filter({hasText:"const value4 = 4;"}).last()).toBeVisible();
+ await page.getByRole("button",{name:"Open selected lines"}).click();
+ await expect(page.locator(CENTER)).toBeVisible();
+ await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
+ await expect(row(page,CENTER,4)).toHaveAttribute("data-selected-line");
+});
+
 test("sent file annotations retain their captured preview after restoring conversation history",async({page})=>{
  const {composer,sentToChat}=await openChatSession(page);
  await page.route(url=>url.pathname===`/api/v1/sessions/${chatSession}/conversation`,route=>{
@@ -374,4 +393,22 @@ test("sends CRLF selections with blank and whitespace-only rows intact", async (
  const ref=sentToChat[0].fileReferences[0];
  expect(ref.lines.map(row=>row.text)).toEqual(["services:","","  web:"," \t","    image: example"]);
  expect(ref).toMatchObject({line:1,endLine:5,truncated:false});
+});
+
+test("mixed diff annotations preserve the new side of trailing context",async({page})=>{
+ test.setTimeout(60_000);
+ await openChatSession(page);
+ let selected:ChatFileReference|undefined;
+ await page.route("**/conversation/file-references/resolve",route=>{
+  selected=route.request().postDataJSON() as ChatFileReference;
+  return route.fulfill({json:{state:"unchanged",path:selected.path,line:selected.line,endLine:selected.endLine,side:selected.side}});
+ });
+ await selectText(page,row(page,REVIEW,5,"change-deletion"),row(page,REVIEW,8));
+ await askButton(page).getByRole("button",{name:"Add to chat"}).click();
+ await page.getByRole("button",{name:"1 annotation"}).click();
+ await page.getByRole("button",{name:"Open selected lines"}).click();
+ expect(selected?.endSide).toBe("new");
+ expect(selected?.lines.at(-1)).toMatchObject({kind:"context",side:"new",oldNo:7,newNo:8});
+ await expect(row(page,CENTER,5,"change-deletion")).toHaveAttribute("data-selected-line");
+ await expect(row(page,CENTER,8)).toHaveAttribute("data-selected-line");
 });
