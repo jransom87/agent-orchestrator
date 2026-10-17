@@ -123,3 +123,16 @@ it("blocks navigation after revalidation rejects the annotation", async () => {
  expect(screen.queryByRole("button",{name:/^Open selected lines:/})).not.toBeInTheDocument();
  expect(screen.getByText("captured();")).toBeInTheDocument();
 });
+
+it("opens a uniquely moved source without rewriting its captured reference", async () => {
+	const moved = { state: "moved", path: ref.path, line: 3, endLine: 3, newLineOffset: 2 };
+	request.mockResolvedValue({ data: moved });
+	const open = vi.fn();
+	setup(open);
+	fireEvent.click(screen.getByRole("button", { name: "1 annotation" }));
+	await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Source moved"));
+	fireEvent.click(screen.getByRole("button", { name: /^Open selected lines:/ }));
+	await waitFor(() => expect(open).toHaveBeenCalledWith(ref, moved));
+	expect(ref.line).toBe(1);
+	expect(ref.lines[0].newNo).toBe(1);
+});

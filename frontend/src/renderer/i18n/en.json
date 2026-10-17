@@ -3203,5 +3203,9 @@
 	"chat.fileAnnotationInvalid": "Selection could not be validated. Remove it and add the selection again.",
 	"chat.fileAnnotationCheckFailed": "Source check failed. Try again later.",
 	"chat.fileAnnotationOpen": "Open selected lines",
-	"chat.fileAnnotationChangedDuringOpen": "Source changed while opening. Reopen the annotation to view the captured selection."
+	"chat.fileAnnotationChangedDuringOpen": "The selected lines could not be verified in this view. Reopen the annotation to view the captured selection.",
+	"chat.fileAnnotationMoved": "Source moved.",
+	"chat.fileAnnotationAmbiguous": "Selected code appears in more than one location.",
+	"chat.fileAnnotationTruncated": "Source navigation is unavailable for a truncated selection.",
+	"chat.fileAnnotationRetry": "Retry source check"
 }
