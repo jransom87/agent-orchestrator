@@ -1,3 +1,4 @@
+import { FileAnnotationContext } from "./FileAnnotationPreview";
 import type { ChatFileReference } from "../../../shared/chat-file-reference";
 import { TurnWorkSummary } from "./TurnWorkSummary";
 import { useChatDraftTranslation } from "../../lib/chat-draft-messages";
@@ -1583,6 +1584,7 @@ function ChatWorkspaceContent({
 	}, [conversationEmpty]);
 
 	return (
+ <FileAnnotationContext.Provider value={{ sessionId: snapshot.sessionId, hostId: activeRemoteHostId }}>
 		<section
 			ref={surfaceRef}
 			onKeyDown={handleChatKeyDown}
@@ -1919,6 +1921,7 @@ function ChatWorkspaceContent({
 				}}
 			/>
 		</section>
+ </FileAnnotationContext.Provider>
 	);
 }
 

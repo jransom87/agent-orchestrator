@@ -3261,5 +3261,8 @@
 	"chat.draft.fileReferencesCompactUnsupported": "Remove file annotations before running /compact.",
 	"chat.fileAnnotationShowMore": "Mostrar más",
 	"chat.fileAnnotationShowLess": "Mostrar menos",
-	"files.addToChatRejected": "No se añadió la selección. Espera a que termine el envío o revisa el borrador e inténtalo de nuevo."
+	"files.addToChatRejected": "No se añadió la selección. Espera a que termine el envío o revisa el borrador e inténtalo de nuevo.",
+	"chat.fileAnnotationChanged": "Source changed.",
+	"chat.fileAnnotationUnavailable": "Source unavailable.",
+	"chat.fileAnnotationCapturedPreview": "Showing captured selection."
 }
