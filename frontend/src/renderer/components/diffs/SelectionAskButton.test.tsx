@@ -16,7 +16,7 @@ describe("SelectionAskButton", () => {
 	it("asks in chat without taking the selection away", () => {
 		const onAsk = vi.fn();
 		render(<SelectionAskButton onAsk={onAsk} source={source({ range: { start: 2, end: 4 }, point: { x: 120, y: 80 }, dragging: false })} />);
-		const button = screen.getByRole("button", { name: "Ask in chat" });
+		const button = screen.getByRole("button", { name: "Add to chat" });
 		expect(fireEvent.mouseDown(button)).toBe(false);
 		fireEvent.click(button);
 		expect(onAsk).toHaveBeenCalledTimes(1);
@@ -24,6 +24,6 @@ describe("SelectionAskButton", () => {
 
 	it("lets a selection still being dragged pass through it", () => {
 		render(<SelectionAskButton onAsk={vi.fn()} source={source({ range: { start: 2, end: 4 }, point: { x: 0, y: 0 }, dragging: true })} />);
-		expect(screen.getByRole("button", { name: "Ask in chat" }).parentElement).toHaveStyle({ pointerEvents: "none" });
+		expect(screen.getByRole("button", { name: "Add to chat" }).parentElement).toHaveStyle({ pointerEvents: "none" });
 	});
 });

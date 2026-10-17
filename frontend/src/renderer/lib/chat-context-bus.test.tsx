@@ -33,8 +33,7 @@ describe("useAskInChat", () => {
 		expect(revealed).toHaveBeenCalledTimes(1);
 		expect(received).toHaveBeenCalledWith(expect.objectContaining({
 			path: "src/retry.ts",
-			display: "retry.ts#L3-L4",
-			wire: expect.stringContaining("[src/retry.ts#L3-L4]"),
+			sessionId: "sess-chat", lines: range.lines, truncated: false,
 		}));
 
 		act(() => unsubscribe());
@@ -51,7 +50,7 @@ describe("useAskInChat", () => {
 		});
 		expect(result.current).toBeDefined();
 		act(() => result.current?.(range));
-		expect(received).toHaveBeenCalledWith(expect.objectContaining({ display: "retry.ts#L3-L4" }));
+		expect(received).toHaveBeenCalledWith(expect.objectContaining({ path: "src/retry.ts", sessionId: "sess-remote", hostId: "box-2" }));
 		act(() => unsubscribe());
 	});
 });

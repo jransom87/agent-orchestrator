@@ -1,3 +1,4 @@
+import type { ChatFileReference } from "../src/shared/chat-file-reference";
 import path from "node:path";
 import { _electron as electron, expect, test as base, type Locator, type Page } from "@playwright/test";
 import { agentReadiness } from "../src/renderer/test/agent-readiness-fixtures";
@@ -11,8 +12,8 @@ const test = process.env.AO_E2E_ELECTRON
 	? base.extend({
 		page: async ({}, use) => {
 			const app = await electron.launch({
-				executablePath: path.join(process.cwd(), "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"),
-				args: [path.join(process.cwd(), "e2e/support/electron-shell.cjs")],
+				executablePath: require("electron") as string,
+				args: [path.join(__dirname, "support/electron-shell.cjs")],
 			});
 			await use(await app.firstWindow());
 			await app.close();
@@ -52,8 +53,8 @@ function quietEventStream(route: Parameters<Parameters<Page["route"]>[1]>[0]) {
 }
 
 /** Serves one changed file for `id`, and records what the session's chat sends. */
-async function stubWorkspace(page: Page, id: string): Promise<string[]> {
-	const sentToChat: string[] = [];
+async function stubWorkspace(page: Page, id: string) {
+	const sentToChat: Array<{ text: string; fileReferences: ChatFileReference[] }> = [];
 	const file = { path: filePath, status: "modified", additions: 2, deletions: 1, size: after.length, binary: false, editable: true, fileFingerprint: "fp-1" };
 	const detail = {
 		sessionId: id, path: filePath, status: "modified", additions: 2, deletions: 1, size: after.length, binary: false, deleted: false,
@@ -77,7 +78,7 @@ async function stubWorkspace(page: Page, id: string): Promise<string[]> {
 			return route.fulfill({ json: { sessionId: id, path: filePath, side, binary: false, content, exists: true, size: content.length, truncated: false, workspaceVersion: "workspace-1", revision: side } });
 		}
 		if (endpoint === "/conversation/messages" && route.request().method() === "POST") {
-			sentToChat.push((route.request().postDataJSON() as { text: string }).text);
+			sentToChat.push(route.request().postDataJSON());
 			return route.fulfill({ json: { status: "ok" } });
 		}
 		return route.fallback();
@@ -87,14 +88,17 @@ async function stubWorkspace(page: Page, id: string): Promise<string[]> {
 
 /** A Chat-mode worker with one changed file, opened on its Files tab. */
 async function openChatSession(page: Page) {
-	await installFakeAgent(page, { projectId, projectName: projectId, workers: [{ id: chatSession, provider: "codex", title: "Ask in chat", mode: "chat" }] });
+	await installFakeAgent(page, { projectId, projectName: projectId, workers: [{ id: chatSession, provider: "codex", title: "Add to chat", mode: "chat" }] });
 	await page.route("http://127.0.0.1:8080/api/v1/**", async (route) => {
 		if (route.request().headers().accept?.includes("text/event-stream")) return quietEventStream(route);
 		const pathname = new URL(route.request().url()).pathname;
-		if (pathname === "/api/v1/agents/readiness" || pathname === "/api/v1/agents/readiness/ensure") return route.fulfill({ json: { agents: [agentReadiness("codex", "Codex")] } });
+		if (pathname === "/api/v1/agents/installers") return route.fulfill({json:{agents:[]}});
+  if (pathname === "/api/v1/agents/auth-plans") return route.fulfill({json:{plans:[]}});
+  if (pathname === "/api/v1/agents/install-jobs") return route.fulfill({json:{jobs:[]}});
+  if (pathname === "/api/v1/agents/readiness" || pathname === "/api/v1/agents/readiness/ensure") return route.fulfill({ json: { agents: [agentReadiness("codex", "Codex")] } });
 		if (pathname === `/api/v1/projects/${projectId}`) return route.fulfill({ json: { status: "ok", project: { id: projectId, agent: "codex", config: { worker: { agent: "codex" } } } } });
 		if (pathname === `/api/v1/sessions/${chatSession}/conversation`) {
-			return route.fulfill({ json: { conversationId: "conversation-ask-in-chat", sessionId: chatSession, harness: "codex", mode: "chat", controller: "ready", latestSequence: 0, oldestSequence: 0, hasMoreBefore: false, turns: [], messages: [], activities: [], settings: {} } });
+			return route.fulfill({ json: { conversationId: "conversation-ask-in-chat", sessionId: chatSession, harness: "codex", mode: "chat", controller: "ready", supportsFileReferences: true, latestSequence: 0, oldestSequence: 0, hasMoreBefore: false, turns: [], messages: [], activities: [], settings: {} } });
 		}
 		if (pathname === `/api/v1/sessions/${chatSession}/conversation/models`) return route.fulfill({ json: { models: [], selected: {} } });
 		if (pathname === `/api/v1/sessions/${chatSession}/conversation/skills`) return route.fulfill({ json: { skills: [] } });
@@ -169,14 +173,14 @@ test.beforeEach(async ({ page }) => {
 	page.on("pageerror", (error) => { throw error; });
 });
 
-test.describe("Ask in chat from highlighted code", () => {
+test.describe("Add to chat from highlighted code", () => {
 	test("review list: the button follows a drag, asks about lines 2–4, and the chip sends their code", async ({ page }) => {
 		const { composer, sentToChat } = await openChatSession(page);
 		// The review header is slotted from the selected surface's light DOM,
 		// so the file lookup must succeed on that same host (review regression).
 		await expect.poll(() => row(page, REVIEW, 2).evaluate((element) => {
 			const host = (element.getRootNode() as ShadowRoot).host;
-			return host.querySelector("[data-review-item-id]")?.getAttribute("data-review-item-id");
+			return host?.querySelector("[data-review-item-id]")?.getAttribute("data-review-item-id");
 		})).toContain(filePath);
 		await selectText(page, row(page, REVIEW, 2), row(page, REVIEW, 4), { release: false });
 		// Shown while the selection is still being dragged, letting the drag through.
@@ -186,43 +190,43 @@ test.describe("Ask in chat from highlighted code", () => {
 		await expect(askButton(page)).not.toHaveCSS("pointer-events", "none");
 		await expectButtonBy(page, row(page, REVIEW, 4));
 
-		await askButton(page).getByRole("button", { name: "Ask in chat" }).click();
-		await expect(composer).toContainText("retry.ts#L2-L4");
+		await askButton(page).getByRole("button", { name: "Add to chat" }).click();
+		await expect(page.getByRole("button", { name: "1 annotation" })).toBeVisible();
 		await expect(composer).toBeFocused();
 		await expect(askButton(page)).toBeHidden();
 		await page.keyboard.type("why three steps?");
 		await page.keyboard.press("Enter");
 		await expect.poll(() => sentToChat.length).toBe(1);
-		expect(sentToChat[0]).toContain("why three steps?");
-		expect(sentToChat[0]).toContain("[src/retry.ts#L2-L4]");
-		expect(sentToChat[0]).toContain("```diff\n   step(2);\n   step(3);\n const value4 = 4;\n```");
+		expect(sentToChat[0].text).toBe("why three steps?");
+		expect(sentToChat[0].fileReferences[0]).toMatchObject({ path: filePath, line: 2, endLine: 4 });
+		expect(sentToChat[0].fileReferences[0].lines.map(row => `${sentToChat[0].fileReferences[0].side === "file" ? "" : row.kind === "add" ? "+" : row.kind === "del" ? "-" : " "}${row.text}`).join("\n")).toBe("   step(2);\n   step(3);\n const value4 = 4;");
 	});
 
 	test("Cmd/Ctrl+L asks about the highlighted lines", async ({ page }) => {
-		const { composer } = await openChatSession(page);
+		await openChatSession(page);
 		await selectText(page, row(page, REVIEW, 8), row(page, REVIEW, 9));
 		await expect(askButton(page)).toBeVisible();
 		await page.keyboard.press("ControlOrMeta+L");
-		await expect(composer).toContainText("retry.ts#L8-L9");
+		await expect(page.getByRole("button", { name: "1 annotation" })).toBeVisible();
 	});
 
 	test("a highlight across removed and added lines quotes both, with markers", async ({ page }) => {
-		const { composer, sentToChat } = await openChatSession(page);
+		const { sentToChat } = await openChatSession(page);
 		await selectText(page, row(page, REVIEW, 5, "change-deletion"), row(page, REVIEW, 7, "change-addition"));
-		await askButton(page).getByRole("button", { name: "Ask in chat" }).click();
-		await expect(composer).toContainText("retry.ts#L5-L7");
+		await askButton(page).getByRole("button", { name: "Add to chat" }).click();
+		await expect(page.getByRole("button", { name: "1 annotation" })).toBeVisible();
 		await page.keyboard.press("Enter");
 		await expect.poll(() => sentToChat.length).toBe(1);
-		expect(sentToChat[0]).toContain("```diff\n-  step(5);\n+  step(5, { retry: true });\n   step(6);\n+  logStep(6);\n```");
+		expect(sentToChat[0].fileReferences[0].lines.map(row => `${sentToChat[0].fileReferences[0].side === "file" ? "" : row.kind === "add" ? "+" : row.kind === "del" ? "-" : " "}${row.text}`).join("\n")).toBe("-  step(5);\n+  step(5, { retry: true });\n   step(6);\n+  logStep(6);");
 	});
 
 	test("in a split diff, old-side lines keep their old numbers", async ({ page }) => {
-		const { inspector, composer } = await openChatSession(page);
+		const { inspector } = await openChatSession(page);
 		await inspector.getByRole("button", { name: "Split diff view" }).click();
 		const oldRow = (line: number) => page.locator(`${REVIEW} diffs-container [data-deletions] [data-line="${line}"]`).first();
 		await selectText(page, oldRow(6), oldRow(7));
-		await askButton(page).getByRole("button", { name: "Ask in chat" }).click();
-		await expect(composer).toContainText("retry.ts#L6-L7 (old)");
+		await askButton(page).getByRole("button", { name: "Add to chat" }).click();
+		await expect(page.getByRole("button", { name: "1 annotation" })).toBeVisible();
 	});
 
 	test("the full file in the centre: asking brings Chat forward with the file's lines", async ({ page }) => {
@@ -230,20 +234,20 @@ test.describe("Ask in chat from highlighted code", () => {
 		await inspector.getByRole("button", { name: "Open full file" }).click();
 		await selectText(page, row(page, CENTER, 3), row(page, CENTER, 6));
 		await expectButtonBy(page, row(page, CENTER, 6));
-		await askButton(page).getByRole("button", { name: "Ask in chat" }).click();
+		await askButton(page).getByRole("button", { name: "Add to chat" }).click();
 		await expect(composer).toBeVisible();
-		await expect(composer).toContainText("retry.ts#L3-L6");
+		await expect(page.getByRole("button", { name: "1 annotation" })).toBeVisible();
 		await page.keyboard.press("Enter");
 		await expect.poll(() => sentToChat.length).toBe(1);
-		expect(sentToChat[0]).toContain("```ts\n  step(3);\nconst value4 = 4;\n  step(5, { retry: true });\n  step(6);\n```");
+		expect(sentToChat[0].fileReferences[0].lines.map(row => `${sentToChat[0].fileReferences[0].side === "file" ? "" : row.kind === "add" ? "+" : row.kind === "del" ? "-" : " "}${row.text}`).join("\n")).toBe("  step(3);\nconst value4 = 4;\n  step(5, { retry: true });\n  step(6);");
 	});
 
 	test("the diff in the centre: asking about a range across a change", async ({ page }) => {
-		const { inspector, composer } = await openChatSession(page);
+		const { inspector } = await openChatSession(page);
 		await inspector.getByRole("button", { name: "Open diff in center" }).click();
 		await selectText(page, row(page, CENTER, 4), row(page, CENTER, 7, "change-addition"));
-		await askButton(page).getByRole("button", { name: "Ask in chat" }).click();
-		await expect(composer).toContainText("retry.ts#L4-L7");
+		await askButton(page).getByRole("button", { name: "Add to chat" }).click();
+		await expect(page.getByRole("button", { name: "1 annotation" })).toBeVisible();
 	});
 
 	test("the button hides on Escape, when scrolled away (returning when back), and when the rows redraw", async ({ page }) => {
@@ -301,7 +305,7 @@ test.describe("Ask in chat from highlighted code", () => {
 	});
 });
 
-test("a TUI session has no Chat composer, so highlighting offers no Ask in chat", async ({ page }) => {
+test("a TUI session has no Chat composer, so highlighting offers no Add to chat", async ({ page }) => {
 	page.on("pageerror", (error) => { throw error; });
 	await installFakeBridge(page);
 	await page.route("http://127.0.0.1:8080/api/v1/**", (route) => (route.request().headers().accept?.includes("text/event-stream") ? quietEventStream(route) : route.fallback()));
@@ -310,4 +314,22 @@ test("a TUI session has no Chat composer, so highlighting offers no Ask in chat"
 	await selectText(page, row(page, REVIEW, 2), row(page, REVIEW, 4));
 	await page.waitForTimeout(400);
 	await expect(askButton(page)).toHaveCount(0);
+});
+
+test("sent file annotations retain their captured preview after restoring conversation history",async({page})=>{
+ const {composer,sentToChat}=await openChatSession(page);
+ await page.route(url=>url.pathname===`/api/v1/sessions/${chatSession}/conversation`,route=>{
+  const sent=sentToChat[0];
+  return route.fulfill({json:{conversationId:"conversation-ask-in-chat",sessionId:chatSession,harness:"codex",mode:"chat",controller:"ready",supportsFileReferences:true,latestSequence:sent?1:0,oldestSequence:0,hasMoreBefore:false,turns:[],activities:[],settings:{},messages:sent?[{id:"durable-file-message",sequence:1,revision:0,role:"user",origin:"human",text:sent.text,clientMessageId:"sent-file",createdAt:"2026-10-17T00:00:00Z",content:sent.fileReferences.map(fileReference=>({type:"file_reference",fileReference,annotationId:fileReference.id,annotationOrder:fileReference.order}))}]:[]}});
+ });
+ await selectText(page,row(page,REVIEW,3),row(page,REVIEW,4));
+ await askButton(page).getByRole("button",{name:"Add to chat"}).click();
+ await page.keyboard.type("explain captured code");await page.keyboard.press("Enter");
+ await expect.poll(()=>sentToChat.length).toBe(1);
+ await expect(composer).toHaveText("");
+ await page.reload();
+ await page.getByRole("button",{name:"1 annotation"}).click();
+ await expect(page.locator("pre").filter({hasText:"const value4 = 4;"}).last()).toBeVisible();
+ expect(sentToChat[0].text).toBe("explain captured code");
+ expect(sentToChat[0].fileReferences[0].lines.some(row=>row.text==="const value4 = 4;")).toBe(true);
 });

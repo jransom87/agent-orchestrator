@@ -107,6 +107,7 @@ function commentLines(target: FileAnnotationTarget, feedback: string): string[] 
 
 /** One quoted row of a code reference, top to bottom. */
 export type FileReferenceLine = {
+	side?: "file" | "old" | "new";
 	kind: "context" | "add" | "del";
 	oldNo: number | null;
 	newNo: number | null;
@@ -115,6 +116,13 @@ export type FileReferenceLine = {
 
 /** Lines highlighted in a file or diff view, to ask about in chat. */
 export type FileCodeReference = {
+	endSide?: "file" | "old" | "new";
+ previousPath?: string;
+ source?: { kind: "workspace" | "pull_request" | "artifact"; number?: number; snapshot?: string; url?: string };
+ scope?: string;
+ commitSha?: string;
+ fileFingerprint?: string;
+ workspaceVersion?: string;
 	path: string;
 	side: "file" | "old" | "new";
 	line: number;

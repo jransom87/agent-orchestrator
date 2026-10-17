@@ -1,12 +1,13 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
-import { formatFileChatReference, type FileCodeReference, type FileChatReference } from "../../shared/file-annotations";
+import type { FileCodeReference } from "../../shared/file-annotations";
+import { captureFileReference, type ChatFileReference } from "../../shared/chat-file-reference";
 import { sessionUiKey } from "./hosts";
 
 // Lets a file or diff view hand a code reference to the session's Chat
 // composer without threading callbacks through the inspector and centre-pane
 // trees. A composer registers while it can accept a new draft; the session
 // view registers to bring the Chat surface forward when a reference arrives.
-type ReferenceListener = (reference: FileChatReference) => void;
+type ReferenceListener = (reference: ChatFileReference) => void;
 type RevealListener = () => void;
 
 const composers = new Map<string, Set<ReferenceListener>>();
@@ -52,7 +53,7 @@ export function hasChatComposer(sessionId: string): boolean {
 }
 
 /** Delivers a reference to the session's composer; false when none is listening. */
-export function sendReferenceToChat(sessionId: string, reference: FileChatReference): boolean {
+export function sendReferenceToChat(sessionId: string, reference: ChatFileReference): boolean {
 	const listeners = composers.get(sessionId);
 	if (!listeners?.size) return false;
 	for (const reveal of revealers.get(sessionId) ?? []) reveal();
@@ -80,7 +81,7 @@ export function useAskInChat(sessionId: string, hostId?: string): ((reference: F
 	const key = sessionUiKey(sessionId, hostId);
 	const available = useHasChatComposer(key);
 	return useMemo(
-		() => (available ? (reference: FileCodeReference) => void sendReferenceToChat(key, formatFileChatReference(reference)) : undefined),
+		() => (available ? (reference: FileCodeReference) => void sendReferenceToChat(key, captureFileReference(reference, sessionId, hostId)) : undefined),
 		[available, key],
 	);
 }

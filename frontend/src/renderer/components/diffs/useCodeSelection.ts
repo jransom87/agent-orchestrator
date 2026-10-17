@@ -8,7 +8,7 @@ export type CodeSelection = {
 	/** The Pierre surface (one per file) the selection is in. */
 	host: HTMLElement;
 	/** Every selected row, top to bottom, in diff-row form. */
-	rows: DiffRow[];
+	rows: Array<DiffRow & { side?: "old" | "new" }>;
 	/** The selection as a Pierre range, for surfaces that resolve their own rows. */
 	range: SelectedLineRange;
 	/** Just past the end of the selected text on its last line, for the Ask button. */
@@ -72,7 +72,8 @@ export function codeReference(path: string, selection: CodeSelection, diff: bool
 		side: diff ? (selection.range.side === "deletions" ? "old" : "new") : "file",
 		line: selection.range.start,
 		endLine: selection.range.end,
-		lines: selection.rows.map(({ kind, oldNo, newNo, text }) => ({ kind: kind as "context" | "add" | "del", oldNo, newNo, text })),
+		endSide: diff ? (selection.range.endSide === "deletions" ? "old" : "new") : "file",
+		lines: selection.rows.map(({ kind, oldNo, newNo, text, side }) => ({ kind: kind as "context" | "add" | "del", oldNo, newNo, text, side: diff ? side : "file" })),
 	};
 }
 
@@ -111,7 +112,7 @@ export function readCodeSelection(host: HTMLElement, dragging = false): CodeSele
 	const edge = onLastLine.length ? Math.max(...onLastLine.map((rect) => rect.right)) : lastBox.left;
 	return {
 		host,
-		rows: elements.map(diffRow),
+		rows: elements.map(element => ({ ...diffRow(element), side: rowSide(element) === "deletions" ? "old" : "new" })),
 		range: { start: Number(first.getAttribute("data-line")), side: rowSide(first), end: Number(last.getAttribute("data-line")), endSide: rowSide(last) },
 		point: { x: edge, y: lastBox.top + lastBox.height / 2 },
 		dragging,

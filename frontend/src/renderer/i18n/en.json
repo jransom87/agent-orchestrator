@@ -2449,7 +2449,7 @@
 	"files.fileFeedbackTarget": "{{file}} · whole file",
 	"files.selectionFeedbackTarget": "{{file}} · selected text",
 	"files.lineFeedbackTarget": "{{file}} · {{side}} line {{line}}",
-	"files.askInChat": "Ask in chat",
+	"files.askInChat": "Add to chat",
 	"files.feedbackLabel": "Feedback for {{target}}",
 	"files.feedbackPlaceholder": "Describe what the agent should change...",
 	"files.feedbackShortcut": "⌘/Ctrl + Enter to send",
@@ -3188,5 +3188,10 @@
 	"settings.agentAccounts.stopAndMove": "Stop and move",
 	"settings.agentAccounts.switching": "Switching to {{email}}…",
 	"settings.agentAccounts.switchingAccount": "Switching account",
-	"settings.agentAccounts.switchFailed": "The switch failed. The agent stays on its previous account."
+	"settings.agentAccounts.switchFailed": "The switch failed. The agent stays on its previous account.",
+	"chat.capturedSelectionTruncated": "Captured selection truncated",
+	"chat.draft.annotationLimit": "You can attach up to eight annotations. Remove one before adding another.",
+	"chat.draft.fileReferencesUnsupported": "This chat does not support file annotations. Reconnect to an updated daemon or remove the file annotations.",
+	"chat.draft.fileReferencesSideUnsupported": "File annotations cannot be sent to a side chat yet. Remove them or send this message in the main chat.",
+	"chat.draft.fileReferencesCompactUnsupported": "Remove file annotations before running /compact."
 }

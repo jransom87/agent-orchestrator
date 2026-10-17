@@ -1,3 +1,5 @@
+import type { ChatFileReference } from "../../../shared/chat-file-reference";
+import { fileReferenceLabel, fileReferencePreview } from "../../../shared/chat-file-reference";
 import { MessageSquareQuote, X } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -5,6 +7,9 @@ import { cn } from "../../lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 
 export interface ChatAnnotationSummaryItem {
+	kind?: "chat" | "file";
+	fileReference?: ChatFileReference;
+	order?: number;
 	text: string;
 	conversationId?: string;
 	id?: string;
@@ -31,6 +36,7 @@ export function ChatAnnotationSummary({
 	className,
 }: ChatAnnotationSummaryProps) {
 	const [open, setOpen] = useState(false);
+	annotations = [...annotations].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 	const { t } = useTranslation();
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const interactedOutside = useRef(false);
@@ -94,7 +100,11 @@ export function ChatAnnotationSummary({
 				<div className="max-h-[min(24rem,60vh)] space-y-1.5 overflow-y-auto p-0.5" aria-label={t("chat.annotationReferences")}>
 					{annotations.map((annotation, index) => (
 						<div key={annotation.id ?? `${annotation.messageId ?? "annotation"}-${index}`} className="relative min-w-0 rounded bg-interactive-hover">
-							<button
+       {annotation.fileReference ? <div className={cn("px-2.5 py-1.5 text-xs", onRemove && "pr-7")}>
+        <span className="block font-medium">{fileReferenceLabel(annotation.fileReference)}</span>
+        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap select-text">{fileReferencePreview(annotation.fileReference)}</pre>
+        {annotation.fileReference.truncated ? <span className="text-muted-foreground">{t("chat.capturedSelectionTruncated")}</span> : null}
+       </div> : <button
 								type="button"
 								disabled={disabled}
 								className={cn("block w-full min-w-0 rounded bg-transparent px-2.5 py-1.5 text-left text-xs leading-5 text-popover-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50", onRemove && "pr-7")}
@@ -104,10 +114,10 @@ export function ChatAnnotationSummary({
 								}}
 							>
 								<span className="block truncate">{annotation.text}</span>
-							</button>
+							</button>}
 							{onRemove ? (
-								<button
-									type="button"
+ <button
+ type="button"
 									ref={(node) => { removeRefs.current[index] = node; }}
 									disabled={disabled}
 									aria-label={t("chat.removeAnnotation", { count: index + 1 })}

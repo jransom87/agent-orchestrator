@@ -1680,6 +1680,13 @@ func retryPromptContent(raw string, capabilities ports.ChatCapabilities) ([]port
 			if !capabilities.Has(ports.ChatCapabilityImages) {
 				return nil, fmt.Errorf("%w: image attachments are unsupported", ErrRetryUnsupported)
 			}
+		case "file_reference":
+			if item.FileReference == nil {
+				return nil, fmt.Errorf("%w: missing file reference", ErrRetryContentInvalid)
+			}
+			if err := ValidateFileReference(*item.FileReference); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrRetryContentInvalid, err)
+			}
 		case "excerpt":
 			if item.Excerpt == nil {
 				return nil, fmt.Errorf("%w: chat excerpts require verified context", ErrRetryContentInvalid)
@@ -1913,6 +1920,10 @@ func excerptDeliveryMessage(msg ports.ChatUserMessage) ports.ChatUserMessage {
 	for _, item := range msg.Content {
 		if item.Internal && item.Type == "text" {
 			fallback.WriteString("\n\n" + item.Text)
+			continue
+		}
+		if item.Type == "file_reference" && item.FileReference != nil {
+			fallback.WriteString("\n\n" + fileReferenceText(*item.FileReference))
 			continue
 		}
 		if item.Type != "excerpt" || item.Excerpt == nil {

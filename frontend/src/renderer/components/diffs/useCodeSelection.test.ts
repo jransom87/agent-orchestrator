@@ -57,10 +57,10 @@ describe("readCodeSelection", () => {
 		select(host, rowAt(host, 0, 0), rowAt(host, 0, 3), 3);
 		const selection = readCodeSelection(host);
 		expect(selection?.rows).toEqual([
-			{ kind: "context", oldNo: 4, newNo: 4, text: "const a = 1;" },
-			{ kind: "del", oldNo: 5, newNo: null, text: "old();" },
-			{ kind: "add", oldNo: null, newNo: 5, text: "next();" },
-			{ kind: "context", oldNo: 7, newNo: 8, text: "done();" },
+			{ kind: "context", side: "new", oldNo: 4, newNo: 4, text: "const a = 1;" },
+			{ kind: "del", side: "old", oldNo: 5, newNo: null, text: "old();" },
+			{ kind: "add", side: "new", oldNo: null, newNo: 5, text: "next();" },
+			{ kind: "context", side: "new", oldNo: 7, newNo: 8, text: "done();" },
 		]);
 		expect(selection?.range).toEqual({ start: 4, side: "additions", end: 8, endSide: "additions" });
 	});
@@ -73,8 +73,8 @@ describe("readCodeSelection", () => {
 		select(host, rowAt(host, 0, 0), rowAt(host, 0, 1), 2);
 		const selection = readCodeSelection(host);
 		expect(selection?.rows).toEqual([
-			{ kind: "context", oldNo: 6, newNo: 6, text: "step();" },
-			{ kind: "context", oldNo: 7, newNo: 8, text: "done();" },
+			{ kind: "context", side: "old", oldNo: 6, newNo: 6, text: "step();" },
+			{ kind: "context", side: "old", oldNo: 7, newNo: 8, text: "done();" },
 		]);
 		expect(selection?.range).toEqual({ start: 6, side: "deletions", end: 7, endSide: "deletions" });
 	});
@@ -93,7 +93,7 @@ describe("codeReference", () => {
 			{ side: "additions", rows: [[6, "context", "step();", 6], [8, "context", "done();", 7]] },
 		]);
 		select(host, rowAt(host, 0, 0), rowAt(host, 0, 1), 2);
-		expect(codeReference("src/a.ts", readCodeSelection(host)!, true)).toMatchObject({ path: "src/a.ts", side: "old", line: 6, endLine: 7 });
+		expect(codeReference("src/a.ts", readCodeSelection(host)!, true)).toMatchObject({ path: "src/a.ts", side: "old", endSide: "old", line: 6, endLine: 7 });
 	});
 
 	it("marks a file-view selection as file lines", () => {
