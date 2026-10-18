@@ -97,20 +97,54 @@ func zcodeLocalAuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) {
 	return ports.AgentAuthStatusAuthorized, nil
 }
 
-// zcodeCredentialsPath mirrors the CLI's shared-store resolution: the
-// ZCODE_DATA_BASE_DIR override when set, else the user's home directory, with
-// the store always at .zcode/v2/credentials.json underneath. The cipher seed
-// keeps using the real home either way (see zcodeCredentialKey).
+// zcodeCredentialsPath resolves the credential store the adapter probes. The
+// probe, the agentauth login plan, and every session launch must agree on one
+// store, so all three resolve it the same way: an explicit
+// ZCODE_DATA_BASE_DIR wins; otherwise the adapter-owned location under AO's
+// data dir, <aoDataDir>/harnesses/zcode (see runtime_env.go — the launch path
+// injects exactly that value, and the login plan does the same).
 func zcodeCredentialsPath() (string, bool) {
-	base := strings.TrimSpace(os.Getenv(zcodeDataBaseDirEnv))
+	base := zcodeCredentialStoreBase()
 	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
-			return "", false
-		}
-		base = home
+		return "", false
 	}
 	return filepath.Join(base, ".zcode", "v2", "credentials.json"), true
+}
+
+// zcodeCredentialStoreBase mirrors the launch-side resolution: explicit
+// ZCODE_DATA_BASE_DIR first, then the AO-owned store derived from the AO data
+// dir (AO_DATA_DIR env, else ~/.ao/data — the same default config.Load uses).
+func zcodeCredentialStoreBase() string {
+	if v := strings.TrimSpace(os.Getenv(zcodeDataBaseDirEnv)); v != "" {
+		return v
+	}
+	return zcodeHarnessStoreBase(aoDataDir())
+}
+
+// zcodeHarnessStoreBase returns the adapter-owned credential root under an AO
+// data dir, or "" when the dir is unknown.
+func zcodeHarnessStoreBase(aoDataDir string) string {
+	if strings.TrimSpace(aoDataDir) == "" {
+		return ""
+	}
+	return filepath.Join(strings.TrimSpace(aoDataDir), "harnesses", "zcode")
+}
+
+// envAODataDir mirrors config.Load's data-dir resolution for the probe, which
+// runs without a LaunchConfig. Adapters cannot import internal/config
+// (layering), so the two-name rule is restated here; config.go:215 is the
+// authoritative description.
+func aoDataDir() string {
+	// EnvDataDir in session_manager; restated to avoid the import cycle.
+	const envAODataDir = "AO_DATA_DIR"
+	if v := strings.TrimSpace(os.Getenv(envAODataDir)); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".ao", "data")
 }
 
 // decryptZcodeCredential returns the plaintext credential. Values prefixed

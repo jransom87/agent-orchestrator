@@ -174,6 +174,76 @@ func TestDecryptZcodeCredentialRejectsWrongSecret(t *testing.T) {
 	}
 }
 
+func TestCredentialStoreBasePrefersExplicitEnv(t *testing.T) {
+	t.Setenv(zcodeDataBaseDirEnv, "/opt/zcode-store")
+	t.Setenv("AO_DATA_DIR", "/should/be/ignored")
+	if got := zcodeCredentialStoreBase(); got != "/opt/zcode-store" {
+		t.Fatalf("base = %q, want explicit env", got)
+	}
+}
+
+func TestCredentialStoreBaseFallsBackToAODataDir(t *testing.T) {
+	t.Setenv(zcodeDataBaseDirEnv, "")
+	t.Setenv("AO_DATA_DIR", "/tmp/ao-x")
+	if got := zcodeCredentialStoreBase(); got != filepath.Join("/tmp/ao-x", "harnesses", "zcode") {
+		t.Fatalf("base = %q, want AO-owned harnesses dir", got)
+	}
+}
+
+func TestAuthStatusReadsAOOwnedStore(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(zcodeDataBaseDirEnv, "")
+	t.Setenv("AO_DATA_DIR", dir)
+	t.Setenv(zcodeCredentialSecretEnv, testSecret)
+	path := filepath.Join(dir, "harnesses", "zcode", ".zcode", "v2", "credentials.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	valid := jwtWithClaims(t, map[string]any{"exp": time.Now().Add(30 * time.Minute).Unix(), "sub": "u"})
+	data, err := json.Marshal(map[string]string{zcodeAccessTokenKey: sealCredential(t, valid)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := New().AuthStatus(context.Background())
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if status != ports.AgentAuthStatusAuthorized {
+		t.Fatalf("status = %q, want authorized", status)
+	}
+}
+
+func TestAugmentRuntimeLaunchEnv(t *testing.T) {
+	plugin := New()
+
+	t.Run("injects the AO-owned store", func(t *testing.T) {
+		env := map[string]string{}
+		plugin.AugmentRuntimeLaunchEnv(env, "/tmp/ao-data", "sess", "launch")
+		if env[zcodeDataBaseDirEnv] != filepath.Join("/tmp/ao-data", "harnesses", "zcode") {
+			t.Fatalf("env = %v", env)
+		}
+	})
+
+	t.Run("explicit env wins", func(t *testing.T) {
+		env := map[string]string{zcodeDataBaseDirEnv: "/opt/keep"}
+		plugin.AugmentRuntimeLaunchEnv(env, "/tmp/ao-data", "sess", "launch")
+		if env[zcodeDataBaseDirEnv] != "/opt/keep" {
+			t.Fatalf("env = %v, want override preserved", env)
+		}
+	})
+
+	t.Run("empty data dir leaves env untouched", func(t *testing.T) {
+		env := map[string]string{}
+		plugin.AugmentRuntimeLaunchEnv(env, "", "sess", "launch")
+		if _, ok := env[zcodeDataBaseDirEnv]; ok {
+			t.Fatalf("env = %v, want no injection", env)
+		}
+	})
+}
+
 func TestZcodeTokenExpiry(t *testing.T) {
 	exp := time.Now().Add(time.Hour).Truncate(time.Second).UTC()
 	token := jwtWithClaims(t, map[string]any{"exp": exp.Unix()})

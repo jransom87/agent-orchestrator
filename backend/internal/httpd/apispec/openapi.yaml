@@ -15645,6 +15645,7 @@ components:
           - deepseek-harness
           - openhands
           - command-code
+          - zcode
           - cloudflared
           type: string
         updatedAt:
