@@ -2367,6 +2367,7 @@ components:
           - vibe
           - pi
           - autohand
+          - zcode
           type: string
         issueId:
           type: string

@@ -58,7 +58,8 @@ export type AgentProvider =
 	| "kilocode"
 	| "vibe"
 	| "pi"
-	| "autohand";
+	| "autohand"
+	| "zcode";
 
 /** A file in a worker's worktree diff (drives the Git review rail). */
 export type ChangedFile = {
@@ -329,6 +330,7 @@ export function toAgentProvider(provider?: string): AgentProvider {
 		case "vibe":
 		case "pi":
 		case "autohand":
+		case "zcode":
 			return provider;
 		default:
 			return "codex";

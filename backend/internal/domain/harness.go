@@ -28,6 +28,7 @@ const (
 	HarnessVibe       AgentHarness = "vibe"
 	HarnessPi         AgentHarness = "pi"
 	HarnessAutohand   AgentHarness = "autohand"
+	HarnessZcode      AgentHarness = "zcode"
 )
 
 // AllHarnesses lists every supported harness. It is the canonical set used to
@@ -37,7 +38,7 @@ var AllHarnesses = []AgentHarness{
 	HarnessDroid, HarnessAmp, HarnessAgy, HarnessCrush, HarnessCursor, HarnessQwen,
 	HarnessCopilot, HarnessGoose, HarnessAuggie, HarnessContinue, HarnessDevin,
 	HarnessCline, HarnessKimi, HarnessKiro, HarnessKilocode, HarnessVibe, HarnessPi,
-	HarnessAutohand,
+	HarnessAutohand, HarnessZcode,
 }
 
 // IsKnown reports whether h is one of the supported harnesses.
