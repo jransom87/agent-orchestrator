@@ -16,19 +16,28 @@ var _ ports.AgentRuntimeLaunchEnv = (*Plugin)(nil)
 // in the session env map wins (project-level override), then an operator-set
 // ZCODE_DATA_BASE_DIR in the daemon's own environment, then the adapter-owned
 // location under the manager's data dir.
+//
+// It also points the CLI at the AO-owned personal provider config (the
+// coding-plan API key written by `ao zcode-login`) when that file exists and
+// the session env does not already name one, so the launch runs on the API
+// key without an OAuth token. Only the path is exported, never the key.
 func (p *Plugin) AugmentRuntimeLaunchEnv(env map[string]string, dataDir string, _ domain.SessionID, _ string) {
 	if env == nil {
 		return
 	}
-	if _, ok := env[zcodeDataBaseDirEnv]; ok {
-		return
+	if _, ok := env[zcodeDataBaseDirEnv]; !ok {
+		base := strings.TrimSpace(os.Getenv(zcodeDataBaseDirEnv))
+		if base == "" {
+			base = zcodeHarnessStoreBase(dataDir)
+		}
+		if base != "" {
+			env[zcodeDataBaseDirEnv] = base
+		}
 	}
-	base := strings.TrimSpace(os.Getenv(zcodeDataBaseDirEnv))
-	if base == "" {
-		base = zcodeHarnessStoreBase(dataDir)
-	}
-	if base != "" {
-		env[zcodeDataBaseDirEnv] = base
+	if _, ok := env[zcodePersonalProviderConfigEnv]; !ok {
+		if path := PersonalProviderConfigPath(dataDir); personalProviderConfigExists(path) {
+			env[zcodePersonalProviderConfigEnv] = path
+		}
 	}
 }
 
