@@ -201,3 +201,15 @@ it("renders captured file code as static selectable context alongside navigable 
  fireEvent.click(screen.getByRole("button", {name:"chat selection"}));
  expect(onSelect).toHaveBeenCalledOnce();
 });
+
+it("does not bubble preview clicks to the composer and steal selection focus", async () => {
+ const user = userEvent.setup();
+ const focusComposer = vi.fn();
+ const reference = captureFileReference({ path: "src/a.ts", side: "file", line: 1, endLine: 1, lines: [{kind: "context", oldNo: 1, newNo: 1, text: "captured();"}] }, "session");
+ render(<div onClick={focusComposer}><ChatAnnotationSummary annotations={[{id: reference.id, text: reference.path, fileReference: reference}]} /></div>);
+ await user.click(screen.getByRole("button", { name: "1 annotation" }));
+ focusComposer.mockClear();
+ await user.click(screen.getByText("captured();"));
+ expect(focusComposer).not.toHaveBeenCalled();
+ expect(screen.getByRole("dialog")).toBeVisible();
+});

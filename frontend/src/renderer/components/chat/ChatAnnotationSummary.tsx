@@ -85,6 +85,7 @@ export function ChatAnnotationSummary({
 				) : null}
 			</div>
 			<PopoverContent
+				onClick={(event) => event.stopPropagation()}
 				align="start"
 				side="top"
 				className="w-[min(22rem,90vw)] border-0 p-2 shadow-md"
