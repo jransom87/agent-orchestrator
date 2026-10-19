@@ -14,15 +14,14 @@ export function FileAnnotationPreview({reference,onNavigate}:{reference:ChatFile
  if(context && queryClient) return <ResolvedPreview reference={reference} context={context} onNavigate={onNavigate} />;
  return <CapturedPreview reference={reference} />;
 }
-function CapturedPreview({reference,status}:{reference:ChatFileReference;status?:"chat.fileAnnotationChanged" | "chat.fileAnnotationUnavailable"}) {
+function CapturedPreview({reference,status,onOpen,opening}:{reference:ChatFileReference;status?:"chat.fileAnnotationChanged" | "chat.fileAnnotationUnavailable";onOpen?:()=>void;opening?:boolean}) {
  const {t}=useTranslation();
- return <CapturedFileAnnotation reference={reference}>
+ return <CapturedFileAnnotation reference={reference} onOpen={onOpen} opening={opening}>
   {status ? <span className="block text-muted-foreground" role="status">{t(status)} {t("chat.fileAnnotationCapturedPreview")}</span>:null}
  </CapturedFileAnnotation>;
 }
 
 function ResolvedPreview({reference,context,onNavigate}:{reference:ChatFileReference;context:NonNullable<React.ContextType<typeof FileAnnotationContext>>;onNavigate?:()=>void}) {
- const {t}=useTranslation();
  const mounted=useRef(true);
  const [opening,setOpening]=useState(false);
  useEffect(()=>{mounted.current=true;return ()=>{mounted.current=false}},[]);
@@ -41,8 +40,8 @@ function ResolvedPreview({reference,context,onNavigate}:{reference:ChatFileRefer
  });
  useEffect(()=>subscribeWorkspaceFileChanges(context.sessionId,queryClient,context.hostId),[context.sessionId,context.hostId,queryClient]);
  const state=query.isError ? "unavailable" : query.data?.state;
- return <><CapturedPreview reference={reference} status={state==="changed" ? "chat.fileAnnotationChanged" : state==="unavailable" ? "chat.fileAnnotationUnavailable" : undefined} />
-  {context.onOpen && state==="unchanged" ? <button type="button" disabled={opening} className="mt-1 text-xs underline underline-offset-2" onClick={async()=>{
+ return <CapturedPreview reference={reference} status={state==="changed" ? "chat.fileAnnotationChanged" : state==="unavailable" ? "chat.fileAnnotationUnavailable" : undefined} opening={opening}
+  onOpen={context.onOpen && state==="unchanged" && !reference.truncated ? async()=>{
    const generation=context.generation;
    const token=generation ? ++generation.current : 0;
    setOpening(true);
@@ -52,6 +51,6 @@ function ResolvedPreview({reference,context,onNavigate}:{reference:ChatFileRefer
     context.onOpen?.(reference,fresh.data);
     onNavigate?.();
    } finally {if(mounted.current)setOpening(false)}
-  }}>{t("chat.fileAnnotationOpen")}</button>:null}
- </>;
+  }:undefined}
+ />;
 }

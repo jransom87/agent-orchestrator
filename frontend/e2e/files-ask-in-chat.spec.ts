@@ -330,12 +330,22 @@ test("file annotations show captured code and open a verified selected range", a
  await askButton(page).getByRole("button",{name:"Add to chat"}).click();
  await expect(composer).toBeVisible();
  await page.getByRole("button",{name:"1 annotation"}).click();
- await expect(page.getByRole("button",{name:"Open selected lines"})).toBeVisible();
+ await expect(page.getByRole("button",{name:/^Open selected lines:/})).toBeVisible();
  await expect(page.locator("pre").filter({hasText:"const value4 = 4;"}).last()).toBeVisible();
- await page.getByRole("button",{name:"Open selected lines"}).click();
+ await page.getByRole("button",{name:/^Open selected lines:/}).click();
  await expect(page.locator(CENTER)).toBeVisible();
  await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
  await expect(row(page,CENTER,4)).toHaveAttribute("data-selected-line");
+ await row(page,CENTER,3).click();
+ await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
+ await page.keyboard.press("Escape");
+ await expect(row(page,CENTER,3)).not.toHaveAttribute("data-selected-line");
+ await page.getByRole("button",{name:"1 annotation"}).click();
+ await page.getByRole("button",{name:/^Open selected lines:/}).click();
+ await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
+ await row(page,CENTER,8).click();
+ await expect(row(page,CENTER,3)).not.toHaveAttribute("data-selected-line");
+ await expect(page.getByRole("button",{name:"1 annotation"})).toBeVisible();
 });
 
 test("sent file annotations retain their captured preview after restoring conversation history",async({page})=>{
@@ -406,7 +416,7 @@ test("mixed diff annotations preserve the new side of trailing context",async({p
  await selectText(page,row(page,REVIEW,5,"change-deletion"),row(page,REVIEW,8));
  await askButton(page).getByRole("button",{name:"Add to chat"}).click();
  await page.getByRole("button",{name:"1 annotation"}).click();
- await page.getByRole("button",{name:"Open selected lines"}).click();
+ await page.getByRole("button",{name:/^Open selected lines:/}).click();
  expect(selected?.endSide).toBe("new");
  expect(selected?.lines.at(-1)).toMatchObject({kind:"context",side:"new",oldNo:7,newNo:8});
  await expect(row(page,CENTER,5,"change-deletion")).toHaveAttribute("data-selected-line");

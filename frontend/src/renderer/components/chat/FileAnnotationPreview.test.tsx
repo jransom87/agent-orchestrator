@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { captureFileReference } from "../../../shared/chat-file-reference";
@@ -14,12 +15,12 @@ const ref = captureFileReference(
 	"session",
 );
 beforeEach(() => request.mockReset());
-function setup(onOpen?: () => void, generation = { current: 0 }) {
+function setup(onOpen?: () => void, generation = { current: 0 }, reference = ref) {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	render(
 		<QueryClientProvider client={client}>
 			<FileAnnotationContext.Provider value={{ sessionId: "session", hostId: "remote-one", onOpen, generation }}>
-				<ChatAnnotationSummary annotations={[{ id: ref.id, text: ref.path, fileReference: ref }]} />
+				<ChatAnnotationSummary annotations={[{ id: reference.id, text: reference.path, fileReference: reference }]} />
 			</FileAnnotationContext.Provider>
 		</QueryClientProvider>,
 	);
@@ -47,7 +48,7 @@ it("rechecks before opening and cancels an older click", async () => {
 		generation = { current: 0 };
 	setup(open, generation);
 	fireEvent.click(screen.getByRole("button", { name: "1 annotation" }));
-	const button = await screen.findByRole("button", { name: "Open selected lines" });
+	const button = await screen.findByRole("button", { name: /^Open selected lines:/ });
 	let finish!: (value: unknown) => void;
 	request.mockImplementationOnce(
 		() =>
@@ -83,4 +84,28 @@ it("distinguishes a disconnected source check from an unavailable source", async
  fireEvent.click(screen.getByRole("button", {name:"1 annotation"}));
  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Source check failed"));
  expect(screen.getByRole("status")).not.toHaveTextContent("Source unavailable");
+});
+
+it("opens only from the header, supports keyboard activation, and keeps code selectable", async () => {
+	const user = userEvent.setup();
+	request.mockResolvedValue({ data: { state: "unchanged", path: ref.path, line: 1, endLine: 1 } });
+	const open = vi.fn();
+	setup(open);
+	await user.click(screen.getByRole("button", { name: "1 annotation" }));
+	const header = await screen.findByRole("button", { name: /^Open selected lines: src\/a.ts/ });
+	expect(screen.queryByText("Open selected lines")).not.toBeInTheDocument();
+	await user.click(screen.getByText("captured();"));
+	expect(open).not.toHaveBeenCalled();
+	header.focus();
+	await user.keyboard("{Enter}");
+	await waitFor(() => expect(open).toHaveBeenCalledOnce());
+});
+
+it("keeps capture-truncated references static even if the resolver reports unchanged", async () => {
+	request.mockResolvedValue({ data: { state: "unchanged" } });
+	setup(vi.fn(), { current: 0 }, { ...ref, truncated: true });
+	fireEvent.click(screen.getByRole("button", { name: "1 annotation" }));
+	await waitFor(() => expect(request).toHaveBeenCalledOnce());
+	expect(screen.queryByRole("button", { name: /^Open selected lines:/ })).not.toBeInTheDocument();
+	expect(screen.getByText("Captured selection truncated")).toBeInTheDocument();
 });

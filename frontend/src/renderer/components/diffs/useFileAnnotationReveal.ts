@@ -6,8 +6,10 @@ export function useFileAnnotationReveal(container: RefObject<HTMLElement | null>
 	const [selectedLines, setSelectedLines] = useState<SelectedLineRange | null>(null);
 	const [changed, setChanged] = useState(false);
 	const consumed = useRef<number | undefined>(undefined);
+	const dismissed = useRef<number | undefined>(undefined);
+	const highlightedRows = useRef<HTMLElement[]>([]);
 	const reveal = useCallback(() => {
-		if (!range) return;
+		if (!range || dismissed.current === range.requestKey) return;
 		const alreadyRevealed = consumed.current === range.requestKey;
 		const roots = [...(container.current?.querySelectorAll("diffs-container") ?? [])].flatMap((host) => (host.shadowRoot ? [host.shadowRoot] : []));
 		const expected = range.lines;
@@ -41,6 +43,7 @@ export function useFileAnnotationReveal(container: RefObject<HTMLElement | null>
 			}
 			elements.push(element);
 		}
+		highlightedRows.current = elements;
 		if (!elements.length || alreadyRevealed) return;
 		const side = oldSide(expected[0]) ? "deletions" : "additions";
 		const endSide = oldSide(expected[expected.length - 1]) ? "deletions" : "additions";
@@ -60,18 +63,42 @@ export function useFileAnnotationReveal(container: RefObject<HTMLElement | null>
 			bottom = Math.min(window.innerHeight, view?.bottom ?? window.innerHeight);
 		if (first.getBoundingClientRect().top < top || last.getBoundingClientRect().bottom > bottom) first.scrollIntoView({ block: "center" });
 	}, [container, range]);
+	const latestReveal = useRef(reveal);
+	latestReveal.current = reveal;
 	useEffect(() => {
 		consumed.current = undefined;
+		dismissed.current = undefined;
+		highlightedRows.current = [];
 		setChanged(false);
 		setSelectedLines(null);
-		const frame = requestAnimationFrame(reveal);
+		const frame = requestAnimationFrame(() => latestReveal.current());
 		const timeout = setTimeout(() => {
-			if (range && consumed.current !== range.requestKey) setChanged(true);
+			if (range && dismissed.current !== range.requestKey && consumed.current !== range.requestKey) setChanged(true);
 		}, 5000);
 		return () => {
 			cancelAnimationFrame(frame);
 			clearTimeout(timeout);
 		};
-	}, [range?.requestKey, reveal]);
+	}, [range?.requestKey]);
+	useEffect(() => {
+		if (!range) return;
+		const dismiss = () => {
+			dismissed.current = range.requestKey;
+			highlightedRows.current = [];
+			setSelectedLines(null);
+		};
+		const onPointerDown = (event: PointerEvent) => {
+			// composedPath reaches the row inside Pierre's shadow root. Do not
+			// interfere with selecting/copying text within the highlighted code.
+			if (event.button === 0 && !highlightedRows.current.some(row => event.composedPath().includes(row))) dismiss();
+		};
+		const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") dismiss(); };
+		document.addEventListener("pointerdown", onPointerDown, true);
+		document.addEventListener("keydown", onKeyDown, true);
+		return () => {
+			document.removeEventListener("pointerdown", onPointerDown, true);
+			document.removeEventListener("keydown", onKeyDown, true);
+		};
+	}, [range?.requestKey]);
 	return { selectedLines: range && consumed.current === range.requestKey ? selectedLines : null, changed, reveal };
 }

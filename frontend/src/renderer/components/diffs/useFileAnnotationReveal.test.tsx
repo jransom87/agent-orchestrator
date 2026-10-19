@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, fireEvent, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { FileAnnotationRange } from "../../../shared/chat-file-reference";
 import { useFileAnnotationReveal } from "./useFileAnnotationReveal";
@@ -87,5 +87,53 @@ it("clears an existing highlight when a live redraw replaces its code", () => {
 	expect(view.result.current.selectedLines).toBeNull();
 	expect(view.result.current.changed).toBe(true);
 	expect(view.scroll).not.toHaveBeenCalled();
+	view.cleanup();
+});
+
+it("dismisses outside the rows and stays dismissed through redraws until reopened", () => {
+	const view = setup('<div data-line="2" data-line-type="context">captured();</div>', range);
+	const row = document.querySelector("diffs-container")!.shadowRoot!.querySelector("[data-line]")!;
+	fireEvent.pointerDown(row, { button: 0, composed: true });
+	expect(view.result.current.selectedLines).not.toBeNull();
+	fireEvent.pointerDown(document.body, { button: 0 });
+	expect(view.result.current.selectedLines).toBeNull();
+	view.rerender({ selection: { ...range } });
+	act(() => view.result.current.reveal());
+	expect(view.result.current.selectedLines).toBeNull();
+	expect(view.result.current.changed).toBe(false);
+	view.rerender({ selection: { ...range, requestKey: 2 } });
+	act(() => view.result.current.reveal());
+	expect(view.result.current.selectedLines).toMatchObject({ start: 2, end: 2 });
+	view.cleanup();
+});
+
+it("dismisses with Escape without clearing unrelated text selection or marking the source changed", () => {
+	const view = setup('<div data-line="2" data-line-type="context">captured();</div>', range);
+	const other = document.createElement("p");
+	other.textContent = "keep my selected text";
+	document.body.append(other);
+	const selection = window.getSelection()!;
+	const textRange = document.createRange();
+	textRange.selectNodeContents(other);
+	selection.removeAllRanges();
+	selection.addRange(textRange);
+	fireEvent.keyDown(document, { key: "Escape" });
+	act(() => view.result.current.reveal());
+	expect(view.result.current.selectedLines).toBeNull();
+	expect(view.result.current.changed).toBe(false);
+	expect(selection.toString()).toBe("keep my selected text");
+	selection.removeAllRanges();
+	other.remove();
+	view.cleanup();
+});
+
+it("distinguishes old and new shadow-root rows when dismissing a split diff", () => {
+	const old = { ...range, side: "old" as const, lines: [{ kind: "del" as const, side: "old" as const, oldNo: 2, newNo: null, text: "captured();" }] };
+	const view = setup('<div data-deletions><div data-line="2" data-line-type="change-deletion">captured();</div></div><div data-line="2" data-line-type="change-addition">replacement();</div>', old);
+	const root = document.querySelector("diffs-container")!.shadowRoot!;
+	fireEvent.pointerDown(root.querySelector("[data-deletions] [data-line]")!, { button: 0, composed: true });
+	expect(view.result.current.selectedLines).not.toBeNull();
+	fireEvent.pointerDown(root.querySelector('[data-line-type="change-addition"]')!, { button: 0, composed: true });
+	expect(view.result.current.selectedLines).toBeNull();
 	view.cleanup();
 });
