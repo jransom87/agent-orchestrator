@@ -78,6 +78,49 @@ func TestLaunchEffortRidesOnEveryTurnAndIsTheDefaultEffort(t *testing.T) {
 	}
 }
 
+// A launch level the catalog does not offer is refused at Start, where the
+// user can change the flag, instead of being substituted into every turn and
+// refused there (a session that exists but can never send).
+func TestStartRefusesALaunchEffortTheModelDoesNotOffer(t *testing.T) {
+	d, srv := newTestDriver(t)
+	cfg := startConfig(t)
+	cfg.Effort = "ultra"
+	conv, err := d.Start(context.Background(), cfg)
+	if !errors.Is(err, ports.ErrChatConfigOptionInvalid) || !strings.Contains(err.Error(), "ultra") {
+		t.Fatalf("Start with an unoffered launch effort = %v, want ErrChatConfigOptionInvalid", err)
+	}
+	if conv != nil {
+		t.Fatal("a refused start returned a conversation")
+	}
+	if !srv.sentMethod(zcodeproto.MethodSessionCreate) {
+		t.Fatal("the refusal must come from the create snapshot's catalog, after session/create")
+	}
+}
+
+// A stored session is never stranded by its launch level: Resume keeps the
+// session usable at the model's own level and logs the substitution.
+func TestResumeDropsALaunchEffortTheModelDoesNotOffer(t *testing.T) {
+	d, srv := newTestDriver(t)
+	resumed, err := d.Resume(context.Background(), ports.ChatResumeConfig{
+		SessionID: "ao-1", DataDir: t.TempDir(), WorkspacePath: t.TempDir(), ProviderConversationID: "sess-1",
+		Permissions: ports.PermissionModeBypassPermissions, HasPriorTurns: true, Effort: "ultra",
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	defer func() { _ = resumed.Close() }()
+	conv := resumed.(*conversation)
+	models, _ := conv.ListModels(context.Background())
+	if len(models) == 0 || models[0].DefaultEffort != "max" {
+		t.Fatalf("default effort = %+v, want the model's own level once the launch level is dropped", models)
+	}
+	sendTurn(t, conv, "x")
+	send := srv.awaitRequest(zcodeproto.MethodSessionSend)
+	if _, ok := paramsMap(t, send)["modelSelection"]; ok {
+		t.Fatalf("session/send still carries the unoffered launch level: %s", send.Params)
+	}
+}
+
 func TestPerTurnEffortOverridesTheLaunchLevel(t *testing.T) {
 	conv, srv := startConversation(t)
 	ref, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "x", Settings: ports.ChatTurnSettings{Effort: "high"}})

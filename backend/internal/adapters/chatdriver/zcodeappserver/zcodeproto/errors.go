@@ -24,7 +24,7 @@ const (
 	// CodeInternal is what session/setModel answers for a selection the
 	// registry refuses: "Provider Registry 中不存在 Model" for an unknown provider
 	// and ModelProtocolError "Reasoning level is required for <provider>/<model>"
-	// when options.reasoningLevel is missing (PROVEN, p7-models.ndjson).
+	// when options.reasoningLevel is missing (PROVEN, p7-models-level-required.ndjson).
 	CodeInternal = -32603
 	// CodeSessionUnavailable carries two distinct messages: "Session not found:
 	// <id>" (`DFn`, unknown id on session/resume; PROVEN, p8-resume.ndjson) and

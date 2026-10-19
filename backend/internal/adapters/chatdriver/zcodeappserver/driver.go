@@ -215,6 +215,17 @@ func (d *Driver) createSession(ctx context.Context, conv *conversation, cfg sess
 		_ = conv.Terminate()
 		return err
 	}
+	// A launch reasoning level (`ao spawn --effort`) the model does not offer
+	// is refused here, against the create snapshot's catalog, rather than
+	// substituted into every turn and refused there: the session would exist
+	// but never send (modelSelectionFor applies the launch level before the
+	// catalog check).
+	if cfg.effort != "" {
+		if _, err := conv.modelSelectionFor("", cfg.effort); err != nil {
+			_ = conv.Terminate()
+			return fmt.Errorf("launch reasoning level: %w", err)
+		}
+	}
 
 	conv.mu.Lock()
 	conv.workspacePath = cfg.workspacePath
@@ -272,11 +283,14 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		conv.mu.Unlock()
 		readCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 		defer cancel()
-		snapshot, readErr := conv.readSnapshot(readCtx, 0)
+		// The proven minimum limit, never 0: the server refuses a zero
+		// messageLimit (-32602), which would keep every replayed request.
+		snapshot, readErr := conv.readSnapshot(readCtx, minimumMessageLimit)
 		if readErr != nil {
 			d.log.Warn("session/read after live reconnect failed; keeping replayed requests", "error", readErr)
 		}
 		conv.reconcilePending(snapshot.Runtime.PendingRequestIDs, readErr == nil)
+		conv.dropUnsupportedLaunchEffort()
 		return conv, nil
 	}
 
@@ -314,6 +328,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		_ = conv.Terminate()
 		return nil, fmt.Errorf("%w: %w", ports.ErrChatResumeFailed, err)
 	}
+	conv.dropUnsupportedLaunchEffort()
 	conv.start(sessionID)
 	return conv, nil
 }

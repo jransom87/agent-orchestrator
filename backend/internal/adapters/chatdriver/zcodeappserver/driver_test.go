@@ -222,6 +222,14 @@ func (s *scriptedServer) serve(serverReads io.Reader) {
 		failure, refused := s.failures[f.Method]
 		s.mu.Unlock()
 		id := *f.ID
+		if f.Method == zcodeproto.MethodSessionRead && !positiveMessageLimit(f.Params) {
+			// The installed bundle's session/read schema (`KXt`, strict) declares
+			// messageLimit int().positive().optional(), so a zero limit is refused
+			// exactly as the live server refuses it; every captured read carried
+			// 1 or 10.
+			s.push(`{"id":` + string(id) + `,"error":{"code":-32602,"message":"messageLimit: Number must be greater than 0"}}`)
+			continue
+		}
 		switch {
 		case handler != nil:
 			go handler(id, f.Params)
@@ -231,6 +239,29 @@ func (s *scriptedServer) serve(serverReads io.Reader) {
 			s.respond(id, reply)
 		}
 	}
+}
+
+// positiveMessageLimit mirrors the server's session/read rule: messageLimit
+// is optional, and when present it must be a positive integer.
+func positiveMessageLimit(params json.RawMessage) bool {
+	var p struct {
+		MessageLimit *float64 `json:"messageLimit"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return false
+	}
+	return p.MessageLimit == nil || (*p.MessageLimit >= 1 && *p.MessageLimit == float64(int64(*p.MessageLimit)))
+}
+
+// messageLimitOf returns the messageLimit a session/read frame carried, or -1
+// when the key was absent.
+func messageLimitOf(t *testing.T, read frame) int {
+	t.Helper()
+	limit, ok := paramsMap(t, read)["messageLimit"].(float64)
+	if !ok {
+		return -1
+	}
+	return int(limit)
 }
 
 func (s *scriptedServer) capturedEnv() []string {
@@ -1398,6 +1429,12 @@ func TestReconnectSkipsCreateResumeAndSubscribe(t *testing.T) {
 	if rawID(*read.ID) != "42" {
 		t.Fatalf("first request id after reconnect = %s, want 42 (NextRequestID+1)", *read.ID)
 	}
+	// The reconcile read must succeed, so it carries the proven positive
+	// limit: a zero messageLimit is refused by the server (-32602) and would
+	// keep every host-replayed request, resolved ones included.
+	if limit := messageLimitOf(t, read); limit < 1 {
+		t.Fatalf("reconcile session/read messageLimit = %d, want >= 1: %s", limit, read.Params)
+	}
 	for _, method := range []string{zcodeproto.MethodSessionCreate, zcodeproto.MethodSessionResume, zcodeproto.MethodSessionSubscribe} {
 		if srv.sentMethod(method) {
 			t.Fatalf("live reconnect sent %s", method)
@@ -1686,6 +1723,36 @@ func TestUsagePollReadsAFreshSnapshotForContext(t *testing.T) {
 		}
 		if !usage.Usage.ContextKnown || usage.Usage.ContextUsed != 4321 || usage.Usage.ContextWindow != 200000 {
 			t.Fatalf("context = %+v, want the post-turn session/read projection", usage.Usage)
+		}
+		read := srv.awaitRequest(zcodeproto.MethodSessionRead)
+		if limit := messageLimitOf(t, read); limit < 1 {
+			t.Fatalf("post-turn session/read messageLimit = %d, want >= 1 (0 is refused): %s", limit, read.Params)
+		}
+	})
+	t.Run("inline usage still reads the context off a fresh snapshot", func(t *testing.T) {
+		// Every proven completed turn carries turn.completed.usage; the context
+		// meter must fill on that path too (DESIGN 4.2), without a session/usage
+		// call and without repeating the totals the inline event reported.
+		conv, srv := startConversation(t)
+		srv.respondTo(zcodeproto.MethodSessionRead, strings.Replace(testSnapshot, `"contextUsed":1200`, `"contextUsed":4321`, 1))
+		sendTurn(t, conv, "hello")
+		srv.push(`{"method":"state.updated","params":{"reason":"prompt_started"}}`)
+		nextEvent(t, conv.Events(), ports.ChatEventTurnStarted)
+		srv.push(`{"method":"session/event","params":{"type":"turn.completed","turnId":"t-native","sessionId":"sess-1","payload":{"response":"OK","resultType":"success","usage":{"source":"provider","inputTokens":10,"outputTokens":2,"cacheReadTokens":1,"totalTokens":12}}}}`)
+		inline := nextEvent(t, conv.Events(), ports.ChatEventUsage)
+		if inline.Usage == nil || !inline.Usage.TotalsKnown || inline.Usage.InputTokens != 10 || inline.Usage.ContextKnown {
+			t.Fatalf("inline usage = %+v", inline.Usage)
+		}
+		nextEvent(t, conv.Events(), ports.ChatEventTurnCompleted)
+		occupancy := nextEvent(t, conv.Events(), ports.ChatEventUsage)
+		if occupancy.Usage == nil || !occupancy.Usage.ContextKnown || occupancy.Usage.ContextUsed != 4321 || occupancy.Usage.ContextWindow != 200000 {
+			t.Fatalf("context usage = %+v, want the post-turn projection", occupancy.Usage)
+		}
+		if occupancy.Usage.TotalsKnown || occupancy.Usage.InputTokens != 0 {
+			t.Fatalf("context usage repeated totals: %+v", occupancy.Usage)
+		}
+		if srv.sentMethod(zcodeproto.MethodSessionUsage) {
+			t.Fatal("session/usage was read although turn.completed carried usage")
 		}
 	})
 	t.Run("unreadable projection is omitted, not stale", func(t *testing.T) {

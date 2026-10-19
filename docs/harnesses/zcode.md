@@ -77,14 +77,15 @@ modes; accept-edits maps to edit, auto to build, bypass-permissions to yolo.
 Read-only (reviewer) sessions are refused: `plan` is a planning mode, not a
 provider-enforced sandbox.
 
-- **Chat mode:** under `edit` and `build` the app server raises
-  `interaction/requestPermission` for side-effecting tools (a safe `date`
-  runs on its own; `touch …` asks). The request appears as an approval card
-  with the provider's own options (allow once, always allow in this project,
-  deny); AO echoes the chosen option back verbatim. The server re-announces an
-  unanswered request under fresh ids (1 s, 2 s, then every 10 s) and AO
-  answers every id with the same reply, which keeps the detached host's
-  replay clean across daemon restarts. An approval nobody answers is refused
+- **Chat mode:** under `edit` (proven; `build`, AO's `auto` mapping, is
+  untested) the app server raises `interaction/requestPermission` for
+  side-effecting tools (a safe `date` runs on its own; `touch …` asks). The
+  request appears as an approval card with the provider's own options (allow
+  once, always allow in this project, deny); AO echoes the chosen option back
+  verbatim. The server re-announces the same unanswered request under fresh
+  frame ids, 1 s apart and doubling to every 10 s, and AO answers every frame
+  id with the same reply, which keeps the detached host's replay clean across
+  daemon restarts. An approval nobody answers is refused
   after 30 minutes rather than decided. `AskUserQuestion` arrives as a form
   (`input.requested`) and is answered the same way; the server never
   auto-answers it. A per-turn permission mode that differs from the session's

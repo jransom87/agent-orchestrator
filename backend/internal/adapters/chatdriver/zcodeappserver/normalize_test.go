@@ -199,29 +199,124 @@ func TestP5FixtureProducesTheToolLifecycle(t *testing.T) {
 // Interrupt (p4-stop.ndjson): session/stop settles the turn as interrupted
 // through turn.completed resultType:"cancelled" with an empty committed
 // response, and the operation-event/prompt_failed frames that follow settle
-// nothing more.
+// nothing more. The streamed partial reply stays streamed: no message.completed
+// is emitted for the empty response, because the store's settle would overwrite
+// the row's text with "" and the timeline would show an empty assistant message
+// for every interrupted turn.
 func TestP4FixtureSettlesACancelledTurnAsInterrupted(t *testing.T) {
 	events := normalizeFixture(t, "p4-stop.ndjson")
 	if countKind(events, ports.ChatEventTurnCompleted) != 1 {
 		t.Fatalf("events = %v", kinds(events))
 	}
-	var completed, message ports.ChatEvent
+	if countKind(events, ports.ChatEventMessageDelta) == 0 {
+		t.Fatalf("no text streamed before the stop: %v", kinds(events))
+	}
+	var completed ports.ChatEvent
 	for _, ev := range events {
 		switch ev.Kind {
 		case ports.ChatEventTurnCompleted:
 			completed = ev
 		case ports.ChatEventMessageCompleted:
-			message = ev
+			t.Fatalf("message.completed %+v emitted for a cancelled turn; it would erase the streamed text", ev)
 		}
 	}
 	if completed.TurnState != domain.TurnStateInterrupted || completed.Err != nil {
 		t.Fatalf("turn.completed = %+v, want interrupted", completed)
 	}
-	if message.Kind == "" || message.Text != "" {
-		t.Fatalf("message.completed = %+v, want the empty committed response", message)
-	}
 	if countKind(events, ports.ChatEventUsage) != 0 {
 		t.Fatal("a cancelled turn carried usage")
+	}
+}
+
+// An empty committed response never settles a row: with text streamed, a
+// cancelled turn.completed emits the settlement alone, and with nothing
+// streamed there is no row to settle either way.
+func TestEmptyResponseEmitsNoMessageCompleted(t *testing.T) {
+	tracker := armedTracker(t)
+	delta := normalize(tracker, sessionEvent("model.streaming", "t-native",
+		`{"kind":"text_delta","assistantMessageId":"msg-1","delta":"Here"}`))
+	if len(delta) != 1 || delta[0].Kind != ports.ChatEventMessageDelta || delta[0].ProviderItemID != "msg-1" {
+		t.Fatalf("text_delta = %+v", delta)
+	}
+	events := normalize(tracker, sessionEvent("turn.completed", "t-native", `{"resultType":"cancelled","response":""}`))
+	if len(events) != 1 || events[0].Kind != ports.ChatEventTurnCompleted || events[0].TurnState != domain.TurnStateInterrupted {
+		t.Fatalf("events = %+v, want the interrupted settlement alone", events)
+	}
+}
+
+// A reply split around a tool call (p5-two-messages.ndjson): the turn streams
+// text on one assistantMessageId, runs a tool, then streams more text on a
+// second one, and turn.completed.response repeats only the second message.
+// Each message keeps its own row, keyed by its assistantMessageId like the
+// history import, and the committed text settles the second row only, so the
+// first message is neither overwritten nor folded into the second.
+func TestP5TwoMessagesFixtureKeepsOneRowPerAssistantMessage(t *testing.T) {
+	events := normalizeFixture(t, "p5-two-messages.ndjson")
+	const first = "msg_mvfaa6p7_b8985096-28ad-46c9-aa6f-dd04f3dd69e6"
+	const second = "msg_mvfaatza_ca8bc6f9-3852-4255-9ccc-be9b13a6ea85"
+	text := map[string]string{}
+	var order []string
+	var reply ports.ChatEvent
+	for _, ev := range events {
+		switch ev.Kind {
+		case ports.ChatEventMessageDelta:
+			if _, seen := text[ev.ProviderItemID]; !seen {
+				order = append(order, ev.ProviderItemID)
+			}
+			text[ev.ProviderItemID] += ev.Delta
+		case ports.ChatEventMessageCompleted:
+			if reply.Kind != "" {
+				t.Fatalf("second message.completed: %+v", ev)
+			}
+			reply = ev
+		}
+	}
+	if !reflect.DeepEqual(order, []string{first, second}) {
+		t.Fatalf("delta items = %v, want one row per assistant message", order)
+	}
+	if text[first] != "I'll run those commands now." {
+		t.Fatalf("first message streamed %q", text[first])
+	}
+	if len(text[second]) != 179 || !strings.HasPrefix(text[second], "The `date` command ran successfully") {
+		t.Fatalf("second message streamed %q", text[second])
+	}
+	if reply.ProviderItemID != second || reply.Text != text[second] {
+		t.Fatalf("message.completed = %+v, want the second message's row with exactly its streamed text", reply)
+	}
+	// Both reasoning rows open and close on their own message.
+	var reasoning []string
+	for _, ev := range events {
+		if ev.Kind == ports.ChatEventActivityCompleted && ev.ActivityKind == domain.ActivityKindReasoning {
+			reasoning = append(reasoning, ev.ProviderItemID)
+		}
+	}
+	if !reflect.DeepEqual(reasoning, []string{reasoningItem(first, ""), reasoningItem(second, "")}) {
+		t.Fatalf("reasoning rows completed = %v", reasoning)
+	}
+	tail := []ports.ChatEventKind{ports.ChatEventMessageCompleted, ports.ChatEventUsage, ports.ChatEventTurnCompleted}
+	got := kinds(events)
+	if !reflect.DeepEqual(got[len(got)-len(tail):], tail) || events[len(events)-1].TurnState != domain.TurnStateCompleted {
+		t.Fatalf("events = %v, want suffix %v", got, tail)
+	}
+}
+
+// A model selection without a reasoning level (p7-models-level-required.ndjson):
+// the send is accepted, prompt_started opens the turn, and turn.failed settles
+// it failed with the provider's invalid_model_request code; the operation-event
+// and prompt_failed frames settle nothing more.
+func TestP7LevelRequiredFixtureFailsTheTurnWithInvalidModelRequest(t *testing.T) {
+	events := normalizeFixture(t, "p7-models-level-required.ndjson")
+	if !reflect.DeepEqual(kinds(events), []ports.ChatEventKind{ports.ChatEventTurnStarted, ports.ChatEventTurnCompleted}) {
+		t.Fatalf("events = %v", kinds(events))
+	}
+	completed := events[1]
+	if completed.TurnState != domain.TurnStateFailed || completed.Err == nil {
+		t.Fatalf("turn.completed = %+v", completed)
+	}
+	for _, want := range []string{"Reasoning level is required", "code: invalid_model_request"} {
+		if !strings.Contains(completed.Err.Error(), want) {
+			t.Fatalf("failure %q lacks %q", completed.Err.Error(), want)
+		}
 	}
 }
 
@@ -421,6 +516,9 @@ func TestNormalizeTable(t *testing.T) {
 			n:    sessionEvent("turn.completed", "t-native", `{"response":"OK","resultType":"success","usage":{"source":"provider","inputTokens":10,"outputTokens":2,"cacheReadTokens":1,"totalTokens":12}}`),
 			kind: ports.ChatEventUsage,
 			check: func(t *testing.T, ev ports.ChatEvent) {
+				// Totals only: the context group comes from the pump's post-turn
+				// session/read (TestUsagePollReadsAFreshSnapshotForContext), never
+				// from the inline usage.
 				if ev.Usage == nil || ev.Usage.InputTokens != 10 || ev.Usage.CachedTokens != 1 || !ev.Usage.TotalsKnown || ev.Usage.ContextKnown {
 					t.Fatalf("usage = %+v", ev.Usage)
 				}

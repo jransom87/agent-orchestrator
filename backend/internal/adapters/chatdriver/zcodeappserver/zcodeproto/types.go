@@ -19,7 +19,7 @@ type Workspace struct {
 }
 
 // ModelOptions is the options object of a ModelSelection. PROVEN
-// (p7-models): reasoningLevel is REQUIRED on session/setModel and on
+// (p7-models, p7-models-level-required): reasoningLevel is REQUIRED on session/setModel and on
 // session/send.modelSelection — omitting it fails setModel with -32603
 // "Reasoning level is required for <provider>/<model>" and fails a send's turn
 // with turn.failed error.code invalid_model_request.
@@ -114,7 +114,10 @@ type SessionSubscribeResult struct {
 }
 
 // SessionReadParams is session/read (`mci`). PROVEN with sessionId and
-// messageLimit (p7 limit 1, p9 limit 10). deliveryKind is STATIC.
+// messageLimit (p7 limit 1, p9 limit 10). The params schema (`KXt`, strict)
+// declares messageLimit as int().positive().optional(): 0 is refused with
+// -32602, so a caller that wants no messages sends 1, never 0. deliveryKind
+// is STATIC.
 type SessionReadParams struct {
 	SessionID    string `json:"sessionId"`
 	MessageLimit *int   `json:"messageLimit,omitempty"`

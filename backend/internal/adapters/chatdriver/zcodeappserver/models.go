@@ -174,6 +174,27 @@ func (c *conversation) modelSelectionFor(model, effort string) (*zcodeproto.Mode
 	return &selection, nil
 }
 
+// dropUnsupportedLaunchEffort clears a launch reasoning level the session's
+// current model does not offer, so a resumed session runs at the model's own
+// level instead of failing every turn. Start refuses such a level up front
+// (createSession); a stored session is kept usable rather than stranded by a
+// catalog that changed under it, with the substitution logged.
+func (c *conversation) dropUnsupportedLaunchEffort() {
+	c.mu.Lock()
+	effort := c.launchEffort
+	c.mu.Unlock()
+	if effort == "" {
+		return
+	}
+	if _, err := c.modelSelectionFor("", effort); err != nil {
+		c.log.Warn("launch reasoning level is not offered by the session's model; its default level applies",
+			"effort", effort, "error", err)
+		c.mu.Lock()
+		c.launchEffort = ""
+		c.mu.Unlock()
+	}
+}
+
 // SetModel changes the session's durable model through session/setModel
 // (PROVEN, p7-models.ndjson). The returned snapshot replaces the cached one so
 // ListModels reflects the change. Not wired to a port interface: AO chooses

@@ -55,8 +55,9 @@ type turnTracker struct {
 	// textSource latches which delta kind carried assistant text this turn so
 	// model.streaming and part.delta never double the text (DESIGN 4.2).
 	textSource string
-	// replyItemID is the item id the turn's assistant text was streamed under,
-	// so message.completed settles the same row the deltas built.
+	// replyItemID is the item id the turn's assistant text is currently
+	// streamed under (the latest assistantMessageId), so message.completed
+	// settles the row the last deltas built.
 	replyItemID string
 	// toolTails remembers the last progress tail per tool call for the suffix
 	// diff of DESIGN 4.2.
@@ -242,27 +243,23 @@ func (t *turnTracker) observeCompleted(state domain.TurnState, err error) *ports
 	return ev
 }
 
-// replyItem returns the item id assistant text is accumulated under this turn,
-// adopting the provider's message id on first sight and otherwise a stable
-// synthetic id so the controller folds every delta into one row.
+// replyItem returns the item id assistant text is accumulated under: the
+// provider's assistantMessageId whenever a delta names one, so a reply split
+// around a tool call keeps one row per assistant message (PROVEN,
+// p5-two-messages.ndjson: text on msg A, a tool exchange, then text on msg B),
+// and otherwise a stable synthetic id for the turn. The latest adopted id is
+// the one turn.completed settles, because its response repeats only the last
+// message's text.
 func (t *turnTracker) replyItem(candidate, turn string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.replyItemID == "" {
-		if candidate != "" {
-			t.replyItemID = candidate
-		} else {
-			t.replyItemID = "zcode-reply:" + turn
-		}
+	switch {
+	case candidate != "":
+		t.replyItemID = candidate
+	case t.replyItemID == "":
+		t.replyItemID = "zcode-reply:" + turn
 	}
 	return t.replyItemID
-}
-
-// replyItemKnown reports whether any delta was streamed this turn.
-func (t *turnTracker) replyItemKnown() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.replyItemID != ""
 }
 
 // progressDelta returns the part of a tool stream's new output tail that

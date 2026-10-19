@@ -26,8 +26,15 @@ const eventBuffer = 4096
 // the turn runs on after it and settles through notifications.
 const sendAckTimeout = 60 * time.Second
 
-// usagePollTimeout bounds the session/usage read after a turn settles (U9).
+// usagePollTimeout bounds the session/usage and session/read calls that follow
+// a settled turn (U9, context occupancy).
 const usagePollTimeout = 5 * time.Second
+
+// minimumMessageLimit is the smallest session/read messageLimit the server
+// accepts: the bundle's params schema (`KXt`, strict) declares it
+// int().positive().optional(), so 0 is refused with -32602 (DESIGN 3.8's
+// `messageLimit:0` recipe is wrong). 1 is the PROVEN value (p7).
+const minimumMessageLimit = 1
 
 // deliveryKind is the session/subscribe delivery mode that makes the server
 // dispatch session/event frames (STATIC, U1 settled).
@@ -296,42 +303,51 @@ func (c *conversation) settleInterrupt(ev ports.ChatEvent) ports.ChatEvent {
 	return ev
 }
 
-// maybePollUsage reads session/usage after a settlement that carried no inline
-// usage (STATIC, U9). Best effort and off the pump goroutine so a slow or
-// unsupported read never delays the next event.
+// maybePollUsage follows a settled turn with the reads that complete AO's
+// accounting, best effort and off the pump goroutine so a slow or unsupported
+// read never delays the next event.
+//
+// Context occupancy always comes from a session/read after the turn
+// (projection.contextUsed/contextWindow, PROVEN p7/p9; DESIGN 4.2):
+// turn.completed.usage carries totals only, and the cached snapshot is a
+// creation-time number that would overwrite the live readout if stamped
+// ContextKnown. Unreadable means omitted. Totals come from session/usage only
+// when the settlement carried no inline usage (STATIC, U9); otherwise the
+// inline usage event already reported them and this event leaves TotalsKnown
+// unset, so the controller merges the context group alone.
 func (c *conversation) maybePollUsage(n notification, turnID string) {
-	if !c.usagePoll || inlineUsagePresent(n) {
+	if !c.usagePoll {
 		return
 	}
+	inline := inlineUsagePresent(n)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), usagePollTimeout)
 		defer cancel()
-		var result zcodeproto.SessionUsageResult
-		if err := c.sessionRequest(ctx, zcodeproto.MethodSessionUsage,
-			zcodeproto.SessionUsageParams{SessionID: c.ProviderConversationID()}, &result); err != nil {
-			c.log.Debug("session/usage read failed", "error", err)
-			return
+		usage := &ports.ChatUsage{}
+		if !inline {
+			var result zcodeproto.SessionUsageResult
+			if err := c.sessionRequest(ctx, zcodeproto.MethodSessionUsage,
+				zcodeproto.SessionUsageParams{SessionID: c.ProviderConversationID()}, &result); err != nil {
+				c.log.Debug("session/usage read failed", "error", err)
+			} else if result.InputTokens != 0 || result.OutputTokens != 0 || result.TotalTokens != 0 {
+				total := result.TotalTokens
+				if total == 0 {
+					total = result.InputTokens + result.OutputTokens
+				}
+				usage.InputTokens, usage.OutputTokens = result.InputTokens, result.OutputTokens
+				usage.CachedTokens, usage.TotalTokens = result.CacheReadTokens, total
+				usage.TotalsKnown = true
+			}
 		}
-		if result.InputTokens == 0 && result.OutputTokens == 0 && result.TotalTokens == 0 {
-			return
-		}
-		total := result.TotalTokens
-		if total == 0 {
-			total = result.InputTokens + result.OutputTokens
-		}
-		usage := &ports.ChatUsage{
-			InputTokens: result.InputTokens, OutputTokens: result.OutputTokens,
-			CachedTokens: result.CacheReadTokens, TotalTokens: total, TotalsKnown: true,
-		}
-		// Context occupancy comes from a snapshot read after the turn, never the
-		// cached one: a creation-time value stamped ContextKnown would overwrite
-		// the live readout with a stale number. Unreadable means omitted.
-		if snapshot, err := c.readSnapshot(ctx, 0); err != nil {
-			c.log.Debug("session/read after usage poll failed; context omitted", "error", err)
+		if snapshot, err := c.readSnapshot(ctx, minimumMessageLimit); err != nil {
+			c.log.Debug("session/read after turn failed; context omitted", "error", err)
 		} else if window := snapshot.Projection.ContextWindow; window > 0 {
 			usage.ContextUsed = snapshot.Projection.ContextUsed
 			usage.ContextWindow = window
 			usage.ContextKnown = true
+		}
+		if !usage.TotalsKnown && !usage.ContextKnown {
+			return
 		}
 		c.emit(ports.ChatEvent{Kind: ports.ChatEventUsage, ProviderTurnID: turnID, Usage: usage})
 	}()
@@ -584,10 +600,12 @@ func (c *conversation) subscribe(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// readSnapshot refreshes the cached snapshot through session/read.
+// readSnapshot refreshes the cached snapshot through session/read. A limit
+// below minimumMessageLimit is raised to it: the server refuses 0 (see the
+// constant), and the proven shape always carries an explicit positive limit.
 func (c *conversation) readSnapshot(ctx context.Context, messageLimit int) (zcodeproto.Snapshot, error) {
 	var snapshot zcodeproto.Snapshot
-	limit := messageLimit
+	limit := max(messageLimit, minimumMessageLimit)
 	err := c.sessionRequest(ctx, zcodeproto.MethodSessionRead, zcodeproto.SessionReadParams{
 		SessionID: c.ProviderConversationID(), MessageLimit: &limit,
 	}, &snapshot)

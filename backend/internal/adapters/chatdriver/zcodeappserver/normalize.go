@@ -160,9 +160,17 @@ func normalizeSessionEvent(params json.RawMessage, t *turnTracker) []ports.ChatE
 		}
 		turn := turnFor(t, p.TurnID)
 		var events []ports.ChatEvent
-		if payload.Response != "" || t.replyItemKnown() {
-			// The committed text: turn.completed.response repeats the whole reply
-			// the deltas streamed (PROVEN, U2), and is "" after session/stop.
+		if payload.Response != "" {
+			// The committed text: turn.completed.response repeats the text the
+			// deltas streamed for the LAST assistant message of the turn (PROVEN:
+			// U2 for a single-message reply; p5-two-messages.ndjson for a reply
+			// split around a tool call, where the earlier message is not
+			// repeated), so it settles only the latest reply row. It is "" after
+			// session/stop (p4-stop.ndjson), and then nothing is emitted: the
+			// store's settle overwrites the row's text, so a message.completed
+			// with "" would erase the streamed partial reply. Earlier message
+			// rows and an interrupted turn's row are closed by the controller's
+			// turn-level settle with their streamed text intact.
 			events = append(events, ports.ChatEvent{
 				Kind:           ports.ChatEventMessageCompleted,
 				ProviderTurnID: turn,
@@ -456,7 +464,7 @@ func exitCodeFromPerf(perf json.RawMessage) (int, bool) {
 // providerFailure renders turn.failed.error as AO's opaque provider failure:
 // the message is the title, and the detail carries the server's detail line,
 // the error code and the attribution the provider route reported (PROVEN
-// shapes: p1-turn-failed-provider.ndjson, p7-models.ndjson).
+// shapes: p1-turn-failed-provider.ndjson, p7-models-level-required.ndjson).
 func providerFailure(e zcodeproto.ProtocolErrorDetail) error {
 	var lines []string
 	if detail := strings.TrimSpace(e.Detail); detail != "" {
