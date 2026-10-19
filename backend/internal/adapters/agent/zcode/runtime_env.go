@@ -1,6 +1,7 @@
 package zcode
 
 import (
+	"context"
 	"os"
 	"strings"
 
@@ -18,9 +19,11 @@ var _ ports.AgentRuntimeLaunchEnv = (*Plugin)(nil)
 // location under the manager's data dir.
 //
 // It also points the CLI at the AO-owned personal provider config (the
-// coding-plan API key written by `ao zcode-login`) when that file exists and
-// the session env does not already name one, so the launch runs on the API
-// key without an OAuth token. Only the path is exported, never the key.
+// coding-plan API key written by `ao zcode-login`) when that file holds a key
+// by the same predicate the auth probe uses, and the session env does not
+// already name one, so readiness and launch agree on which credential the
+// session runs on: a present but unparseable or blank-key file is left out
+// exactly as the probe ignores it. Only the path is exported, never the key.
 func (p *Plugin) AugmentRuntimeLaunchEnv(env map[string]string, dataDir string, _ domain.SessionID, _ string) {
 	if env == nil {
 		return
@@ -35,8 +38,11 @@ func (p *Plugin) AugmentRuntimeLaunchEnv(env map[string]string, dataDir string, 
 		}
 	}
 	if _, ok := env[zcodePersonalProviderConfigEnv]; !ok {
-		if path := PersonalProviderConfigPath(dataDir); personalProviderConfigExists(path) {
-			env[zcodePersonalProviderConfigEnv] = path
+		if path := PersonalProviderConfigPath(dataDir); path != "" {
+			// No evidence collector rides this context, so nothing is recorded.
+			if hasKey, err := providerConfigHasKey(context.Background(), path); err == nil && hasKey {
+				env[zcodePersonalProviderConfigEnv] = path
+			}
 		}
 	}
 }

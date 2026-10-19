@@ -104,6 +104,39 @@ func TestWritePersonalProviderConfig(t *testing.T) {
 	if len(leftovers) != 0 {
 		t.Fatalf("temp files left behind: %v", leftovers)
 	}
+
+	t.Run("tightens a directory the zcode CLI created first", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("POSIX directory modes")
+		}
+		// The common path: a browser login or session launch already pinned
+		// ZCODE_DATA_BASE_DIR at this directory and the CLI mkdir'd it 0755.
+		path := PersonalProviderConfigPath(t.TempDir())
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // simulating the CLI's umask
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // simulating the CLI's umask
+			t.Fatal(err)
+		}
+		if err := WritePersonalProviderConfig(ctx, path, []byte(testAPIKey)); err != nil {
+			t.Fatalf("WritePersonalProviderConfig: %v", err)
+		}
+		dirInfo, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat dir: %v", err)
+		}
+		if got := dirInfo.Mode().Perm(); got != 0o700 {
+			t.Fatalf("pre-existing dir mode = %o after write, want 0700", got)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("mode = %o, want 0600", got)
+		}
+	})
 }
 
 func TestWritePersonalProviderConfigRejectsBadInput(t *testing.T) {
@@ -129,8 +162,14 @@ func TestProviderConfigHasKey(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing.json")
-	if hasKey, err := providerConfigHasKey(ctx, missing); err != nil || hasKey {
+	missingCtx, missingEvidence := ports.WithAuthEvidence(ctx)
+	if hasKey, err := providerConfigHasKey(missingCtx, missing); err != nil || hasKey {
 		t.Fatalf("missing file: hasKey=%v err=%v, want false,nil", hasKey, err)
+	}
+	// The AO-owned file is absent for every OAuth-only user; its absence is
+	// not a credential-store problem and must not surface a diagnostic.
+	if got := missingEvidence.Diagnostics(); len(got) != 0 {
+		t.Fatalf("missing file recorded diagnostics: %+v, want none", got)
 	}
 	empty := filepath.Join(dir, "empty.json")
 	if err := os.WriteFile(empty, []byte("  \n"), 0o600); err != nil {
@@ -236,6 +275,9 @@ func TestAuthStatusPrefersAPIKeyProviderConfig(t *testing.T) {
 		if got := evidence.Identity().Method; got != domain.AgentAccountMethodAccount {
 			t.Fatalf("evidence method = %q, want account (OAuth branch)", got)
 		}
+		if hasDiagnostic(evidence, "credential_file_missing") {
+			t.Fatalf("absent provider config recorded credential_file_missing: %+v", evidence.Diagnostics())
+		}
 	})
 }
 
@@ -271,6 +313,32 @@ func TestAugmentRuntimeLaunchEnvExportsProviderConfig(t *testing.T) {
 			t.Fatalf("env = %v, want no provider config injection", env)
 		}
 	})
+
+	// Launch and probe must agree: a file the probe would not treat as the
+	// credential is not exported to the CLI either.
+	for name, contents := range map[string]string{
+		"unparseable file is not exported": "{broken",
+		"blank key is not exported":        `{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[{"providerId":"zai-api-ao","config":{"access":{"type":"zhipu-coding-plan-api-key","apiKey":"  "}}}]}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			path := PersonalProviderConfigPath(dataDir)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{}
+			plugin.AugmentRuntimeLaunchEnv(env, dataDir, "sess", "launch")
+			if _, ok := env[zcodePersonalProviderConfigEnv]; ok {
+				t.Fatalf("env = %v, want no provider config injection", env)
+			}
+			if env[zcodeDataBaseDirEnv] != filepath.Join(dataDir, "harnesses", "zcode") {
+				t.Fatalf("env = %v, want the store base still pinned", env)
+			}
+		})
+	}
 
 	t.Run("preset value wins", func(t *testing.T) {
 		dataDir := t.TempDir()

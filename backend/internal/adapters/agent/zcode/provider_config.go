@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/authprobe"
@@ -141,8 +142,18 @@ func WritePersonalProviderConfig(ctx context.Context, path string, apiKey []byte
 			data[i] = 0
 		}
 	}()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("zcode: create provider config dir: %w", err)
+	}
+	// MkdirAll only applies the mode when it creates the directory. The zcode
+	// CLI routinely creates <dataDir>/harnesses/zcode first (it is also the
+	// ZCODE_DATA_BASE_DIR every launch and browser login pins) with its own
+	// umask, so tighten the AO-owned directory whether or not it already existed.
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // Owner traversal is required for this private directory.
+			return fmt.Errorf("zcode: restrict provider config dir: %w", err)
+		}
 	}
 	if err := hookutil.AtomicWriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("zcode: write provider config: %w", err)
@@ -152,13 +163,21 @@ func WritePersonalProviderConfig(ctx context.Context, path string, apiKey []byte
 
 // providerConfigHasKey reports whether the AO-owned provider config at path
 // holds a provider rule with a non-empty API key. A missing file is (false,
-// nil); unreadable or invalid JSON records a credential-store diagnostic and
-// returns the error. The key's value is never retained or recorded.
+// nil) and records nothing: the file only exists after `ao zcode-login`
+// option 2, so its absence is the normal state for OAuth users and must not
+// surface a credential_file_missing step that points them at a config-dir
+// mismatch. An unreadable or invalid file records a credential-store
+// diagnostic and returns the error. The key's value is never retained or
+// recorded.
 func providerConfigHasKey(ctx context.Context, path string) (bool, error) {
-	data, err := authprobe.ReadCredentialFile(ctx, path)
-	if os.IsNotExist(err) {
-		return false, nil
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		authprobe.RecordFileDiagnostic(ctx, path, "credential_store_unreadable")
+		return false, err
 	}
+	data, err := authprobe.ReadCredentialFile(ctx, path)
 	if err != nil {
 		return false, err
 	}
@@ -176,14 +195,4 @@ func providerConfigHasKey(ctx context.Context, path string) (bool, error) {
 		}
 	}
 	return false, nil
-}
-
-// personalProviderConfigExists reports whether the AO-owned provider config
-// is a regular file the launched CLI could read.
-func personalProviderConfigExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
 }

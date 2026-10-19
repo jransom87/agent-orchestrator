@@ -150,6 +150,16 @@ func zcodeHarnessStoreBase(aoDataDir string) string {
 // runs without a LaunchConfig. Adapters cannot import internal/config
 // (layering), so the two-name rule is restated here; config.go:215 is the
 // authoritative description.
+//
+// Known limitation: config.Load absolutizes a relative AO_DATA_DIR against the
+// launch cwd before the daemon chdirs into it, while this reads the raw value
+// (and cannot Abs it post-chdir without double-nesting). agentauth and the
+// session manager use the absolutized cfg.DataDir, so with a relative override
+// (AO_DATA_DIR=data) the probe would look under a different directory than the
+// login menu writes and the launches export. The fix belongs in daemon startup
+// (re-export AO_DATA_DIR as cfg.DataDir right after config.Load); until then a
+// relative AO_DATA_DIR is unsupported for the zcode credential and API-key
+// probes.
 func aoDataDir() string {
 	// EnvDataDir in session_manager; restated to avoid the import cycle.
 	const envAODataDir = "AO_DATA_DIR"
