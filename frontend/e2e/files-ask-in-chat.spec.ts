@@ -359,16 +359,16 @@ test("shortens only the displayed file preview and sends every captured row", as
 
 test("sends CRLF selections with blank and whitespace-only rows intact", async ({ page }) => {
  const lines = after.split("\n");
- lines.splice(12,5,"services:","","  web:"," \t","    image: example");
+ lines.splice(0,5,"services:","","  web:"," \t","    image: example");
  const fullText = lines.join("\r\n");
  const {inspector,composer,sentToChat}=await openChatSession(page,fullText);
  await inspector.getByRole("button",{name:"Open full file"}).click();
- await selectText(page,row(page,CENTER,13),row(page,CENTER,17));
+ await selectText(page,row(page,CENTER,1),row(page,CENTER,5));
  await askButton(page).getByRole("button",{name:"Add to chat"}).click();
  await composer.focus();await page.keyboard.press("Enter");
  await expect.poll(()=>sentToChat.length).toBe(1);
  expect(sentToChat[0].fileReferences).toHaveLength(1);
  const ref=sentToChat[0].fileReferences[0];
  expect(ref.lines.map(row=>row.text)).toEqual(["services:","","  web:"," \t","    image: example"]);
- expect(ref).toMatchObject({line:13,endLine:17,truncated:false});
+ expect(ref).toMatchObject({line:1,endLine:5,truncated:false});
 });
