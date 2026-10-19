@@ -136,3 +136,20 @@ it("opens a uniquely moved source without rewriting its captured reference", asy
 	expect(ref.line).toBe(1);
 	expect(ref.lines[0].newNo).toBe(1);
 });
+
+it("can retry a failed check without navigating or replacing captured code", async () => {
+ request.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+ const open=vi.fn();setup(open);
+ fireEvent.click(screen.getByRole("button",{name:"1 annotation"}));
+ await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Source check failed"));
+ request.mockResolvedValue({data:{state:"unchanged",path:ref.path,line:1,endLine:1}});
+ fireEvent.click(screen.getByRole("button",{name:"Retry source check"}));
+ await screen.findByRole("button",{name:/^Open selected lines:/});
+ expect(open).not.toHaveBeenCalled();expect(ref.lines[0].text).toBe("captured();");
+});
+it("does not offer retry for an invalid saved capture", async () => {
+ request.mockResolvedValue({error:{code:"CHAT_FILE_REFERENCE_INVALID"}});setup(vi.fn());
+ fireEvent.click(screen.getByRole("button",{name:"1 annotation"}));
+ await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Remove it and add the selection again"));
+ expect(screen.queryByRole("button",{name:"Retry source check"})).not.toBeInTheDocument();
+});
