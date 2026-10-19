@@ -138,7 +138,9 @@ func TestShouldEmitCLIInvocationSkipsNonUsageAndRoutineInternalCommands(t *testi
 		"hooks":    false,
 		"pty-host": false,
 		"status":   false,
-		"spawn":    true,
+		// zcode-login is the daemon-launched login menu, not a user command.
+		"zcode-login": false,
+		"spawn":       true,
 	} {
 		cmd, ok := byName[name]
 		if !ok {
@@ -182,6 +184,7 @@ func TestTelemetryMetaClassifiesRegisteredCommandPaths(t *testing.T) {
 		"ao pty-host":                {},
 		"ao start":                   {},
 		"ao unreal-provider":         {},
+		"ao zcode-login":             {},
 	}
 
 	var failures []string
