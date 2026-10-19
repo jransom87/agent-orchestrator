@@ -27,6 +27,14 @@ const recentlyResolvedLimit = 64
 // errConversationClosed reports a decision arriving after the controller ended.
 var errConversationClosed = errors.New("conversation closed")
 
+// resolvedReply is what settled a request, kept so a re-announce that crossed
+// the settlement on the wire gets the same answer: AO's decision, or the
+// refusal a timeout, a provider-side resolution or reconciliation sent.
+type resolvedReply struct {
+	reply any
+	err   error
+}
+
 // parkedRequest is one server->client request waiting on a person, shared by
 // every frame id the server re-announced it under (DESIGN 3.3, 3.5).
 //
@@ -45,6 +53,9 @@ type parkedRequest struct {
 	// offered keeps the provider's own response object per option id so the
 	// reply echoes it verbatim: the server zod-parses the result strictly.
 	offered map[string]json.RawMessage
+	// questions is the user-input request's question list, kept to map AO's
+	// form answer back onto the provider's reply shape (U6).
+	questions []zcodeproto.Question
 	// done closes once reply or replyErr is set. waiters counts the frame ids
 	// parked on this record, for diagnostics.
 	done     chan struct{}
@@ -57,6 +68,9 @@ type parkedRequest struct {
 	// reconcilePending rather than by the handler.
 	deferred bool
 	emit     ports.ChatEvent
+	// prestaged marks a record registered from the read loop, in wire order,
+	// before its handler goroutine parsed the frame; the handler fills it in.
+	prestaged bool
 }
 
 // resolve settles every waiter with one answer. Safe to call once; later calls
@@ -135,6 +149,41 @@ func (c *conversation) handleServerRequest(ctx context.Context, req serverReques
 	return nil, &rpcError{Code: zcodeproto.CodeMethodNotFound, Message: fmt.Sprintf("unsupported request %s", req.Method)}
 }
 
+// noteServerRequest runs on the read loop, in wire order, before a server
+// request's handler goroutine exists. While a live reconnect is still
+// reconciling, it registers the frame's requestId as a deferred record so that
+// deferral is decided by the frame's position on the wire, not by whether the
+// handler goroutine reached park before the Resume goroutine finished
+// reconciling: the host replays every unanswered frame before the session/read
+// response, which this same loop delivers afterwards.
+func (c *conversation) noteServerRequest(req serverRequest) {
+	if req.Method != zcodeproto.MethodInteractionRequestPermission &&
+		req.Method != zcodeproto.MethodInteractionRequestUserInput {
+		return
+	}
+	var params struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.RequestID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.reconciling || c.closed {
+		return
+	}
+	if _, pending := c.pending[params.RequestID]; pending {
+		return
+	}
+	if _, settled := c.recentlyResolved[params.RequestID]; settled {
+		return
+	}
+	c.pending[params.RequestID] = &parkedRequest{
+		method: req.Method, requestID: params.RequestID,
+		done: make(chan struct{}), deferred: true, prestaged: true,
+	}
+}
+
 // observeRuntimePreferences records the session id the server named inside
 // session/create. That request's params.sessionId is the PROVEN id source.
 func (c *conversation) observeRuntimePreferences(params json.RawMessage) {
@@ -185,7 +234,10 @@ func (c *conversation) parkPermission(ctx context.Context, req serverRequest) (a
 		Detail:         detail,
 		Decisions:      decisions,
 	}
-	return c.park(ctx, req, params.RequestID, params.ToolCallID, params.TurnID, offered, ev)
+	return c.park(ctx, &parkedRequest{
+		method: req.Method, requestID: params.RequestID, toolCallID: params.ToolCallID,
+		turnID: params.TurnID, offered: offered,
+	}, ev)
 }
 
 // parkUserInput parks interaction/requestUserInput until ResolveInput.
@@ -204,42 +256,55 @@ func (c *conversation) parkUserInput(ctx context.Context, req serverRequest) (an
 		Summary:        inputRequestFrom(params).Message,
 		Input:          inputRequestFrom(params),
 	}
-	return c.park(ctx, req, params.RequestID, "", params.TurnID, nil, ev)
+	return c.park(ctx, &parkedRequest{
+		method: req.Method, requestID: params.RequestID, turnID: params.TurnID, questions: params.Questions,
+	}, ev)
 }
 
 // park registers (or joins) the parked record for a requestId and waits for its
 // answer. Exactly one approval.requested/input.requested is emitted per
-// requestId while every frame id is answered.
-func (c *conversation) park(ctx context.Context, req serverRequest, requestID, toolCallID, turnID string,
-	offered map[string]json.RawMessage, ev ports.ChatEvent) (any, error) {
+// requestId while every frame id is answered. fresh carries what the handler
+// parsed; it becomes the record, or fills in the one noteServerRequest
+// prestaged for this requestId from the read loop.
+func (c *conversation) park(ctx context.Context, fresh *parkedRequest, ev ports.ChatEvent) (any, error) {
+	requestID := fresh.requestID
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return nil, &rpcError{Code: zcodeproto.CodeMethodNotFound, Message: errConversationClosed.Error()}
 	}
-	if reply, ok := c.recentlyResolved[requestID]; ok {
-		// A re-announce that crossed the reply on the wire: answer it the same
-		// way instead of parking a second approval for a decision already made.
+	if settled, ok := c.recentlyResolved[requestID]; ok {
+		// A re-announce that crossed the settlement on the wire: answer it the
+		// same way instead of parking a second approval for a request already
+		// decided, refused or resolved by the provider.
 		c.mu.Unlock()
-		return reply, nil
+		return settled.reply, settled.err
 	}
 	parked, joined := c.pending[requestID]
-	if joined {
+	if joined && !parked.prestaged {
 		parked.waiters++
 		c.mu.Unlock()
 		return c.awaitParked(ctx, parked)
 	}
-	parked = &parkedRequest{
-		method: req.Method, requestID: requestID, toolCallID: toolCallID, turnID: turnID,
-		offered: offered, done: make(chan struct{}), waiters: 1,
+	if joined {
+		parked.prestaged = false
+		parked.toolCallID = fresh.toolCallID
+		parked.turnID = fresh.turnID
+		parked.offered = fresh.offered
+		parked.questions = fresh.questions
+	} else {
+		parked = fresh
+		parked.done = make(chan struct{})
+		parked.deferred = c.reconciling
+		c.pending[requestID] = parked
 	}
-	c.pending[requestID] = parked
-	if toolCallID != "" {
-		c.byToolCallID[toolCallID] = requestID
+	parked.waiters = 1
+	if parked.toolCallID != "" {
+		c.byToolCallID[parked.toolCallID] = requestID
 	}
-	deferred := c.reconciling
+	deferred := parked.deferred
 	if deferred {
-		parked.deferred = true
+		// reconcilePending emits it, or refuses it, once session/read answers.
 		parked.emit = ev
 	}
 	c.mu.Unlock()
@@ -255,8 +320,11 @@ func (c *conversation) park(ctx context.Context, req serverRequest, requestID, t
 		return parked.reply, parked.replyErr
 	case <-timer.C:
 		// Expiry refuses every waiting id rather than deciding; the record is
-		// dropped so a later decision gets ErrChatRequestNotPending.
+		// dropped so a later decision gets ErrChatRequestNotPending. Every path
+		// that removes a record from pending resolves it, so done closes here
+		// even when a provider-side resolution or Close won the race.
 		c.refusePending(requestID, &rpcError{Code: zcodeproto.CodeMethodNotFound, Message: "approval timed out without a decision"})
+		<-parked.done
 		return parked.reply, parked.replyErr
 	case <-ctx.Done():
 		c.refusePending(requestID, ctx.Err())
@@ -275,19 +343,27 @@ func (c *conversation) awaitParked(ctx context.Context, parked *parkedRequest) (
 	}
 }
 
-// refusePending answers every waiter of a request with an error and forgets it.
+// refusePending answers every waiter of a request with an error and forgets
+// it, remembering the refusal for any re-announce still on the wire.
 func (c *conversation) refusePending(requestID string, err error) {
 	c.mu.Lock()
 	parked, ok := c.pending[requestID]
 	if ok {
-		delete(c.pending, requestID)
-		if parked.toolCallID != "" {
-			delete(c.byToolCallID, parked.toolCallID)
-		}
+		c.forgetPendingLocked(parked)
+		c.rememberResolvedLocked(requestID, resolvedReply{err: err})
 	}
 	c.mu.Unlock()
 	if ok {
 		parked.resolve(nil, err)
+	}
+}
+
+// forgetPendingLocked removes a record from the pending maps. Caller holds
+// c.mu and must resolve the record afterwards: every removal resolves.
+func (c *conversation) forgetPendingLocked(parked *parkedRequest) {
+	delete(c.pending, parked.requestID)
+	if parked.toolCallID != "" {
+		delete(c.byToolCallID, parked.toolCallID)
 	}
 }
 
@@ -319,9 +395,16 @@ func (c *conversation) ResolveRequest(ctx context.Context, requestID string, dec
 		return fmt.Errorf("%w: %q (offered: %s)",
 			ports.ErrChatDecisionNotOffered, decision.ID, strings.Join(parked.offeredIDs(), ", "))
 	}
+	if err := ctx.Err(); err != nil {
+		// Checked before delivery, like codex: once settled, the provider has
+		// the consent, so reporting a failure would leave the card pending for
+		// an answer that was in fact given.
+		c.mu.Unlock()
+		return err
+	}
 	c.settleLocked(parked, json.RawMessage(raw))
 	c.mu.Unlock()
-	return ctx.Err()
+	return nil
 }
 
 // ResolveInput answers a parked interaction/requestUserInput with the user's
@@ -342,29 +425,76 @@ func (c *conversation) ResolveInput(ctx context.Context, requestID string, respo
 	}
 	if parked.method != zcodeproto.MethodInteractionRequestUserInput {
 		c.mu.Unlock()
-		return fmt.Errorf("%w: %q expects a decision, not structured input", ports.ErrChatRequestNotPending, requestID)
+		// Refused and left pending: the request is still waiting, for a decision.
+		return fmt.Errorf("%w: %q expects a decision, not structured input", ports.ErrChatDecisionNotOffered, requestID)
+	}
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return err
 	}
 	reply := zcodeproto.UserInputResponse{Action: string(response.Action)}
 	if response.Action == ports.ChatInputActionAccept && response.Content != nil {
-		reply.Content = response.Content
+		reply.Content = userInputReplyContent(parked.questions, response.Content)
 	}
 	c.settleLocked(parked, reply)
 	c.mu.Unlock()
-	return ctx.Err()
+	return nil
+}
+
+// userInputReplyContent shapes AO's form answer into the provider's accept
+// content. inputRequestFrom publishes a schema keyed by each question's header
+// (or text), so a generic AO client answers {<header>: value}; the provider
+// wants the answers keyed by question text under "answers".
+//
+// TODO(U6): STATIC reading of `uii`: content:{answers:{<question text>: value}}.
+// P6 decides between answers/{question}, answer_<i> and answer. Content that
+// already carries an "answers" key is forwarded verbatim.
+func userInputReplyContent(questions []zcodeproto.Question, content map[string]any) map[string]any {
+	if _, shaped := content["answers"]; shaped {
+		return content
+	}
+	answers := make(map[string]any, len(content))
+	consumed := make(map[string]struct{}, len(questions))
+	for i, question := range questions {
+		key := question.Header
+		if key == "" {
+			key = question.Question
+		}
+		if key == "" {
+			key = fmt.Sprintf("answer_%d", i)
+		}
+		value, ok := content[key]
+		if !ok {
+			continue
+		}
+		consumed[key] = struct{}{}
+		text := question.Question
+		if text == "" {
+			text = key
+		}
+		answers[text] = value
+	}
+	for key, value := range content {
+		if _, ok := consumed[key]; !ok {
+			answers[key] = value
+		}
+	}
+	return map[string]any{"answers": answers}
 }
 
 // settleLocked answers a parked request and remembers the reply for any
 // re-announce still in flight. Caller holds c.mu.
 func (c *conversation) settleLocked(parked *parkedRequest, reply any) {
-	delete(c.pending, parked.requestID)
-	if parked.toolCallID != "" {
-		delete(c.byToolCallID, parked.toolCallID)
-	}
-	c.rememberResolvedLocked(parked.requestID, reply)
+	c.forgetPendingLocked(parked)
+	c.rememberResolvedLocked(parked.requestID, resolvedReply{reply: reply})
 	parked.resolve(reply, nil)
 }
 
-func (c *conversation) rememberResolvedLocked(requestID string, reply any) {
+// rememberResolvedLocked keeps what settled a request for the re-announce
+// window. Entries are never dropped on permission.resolved: a re-announce the
+// server wrote before it processed the reply can still be on its way to park
+// when that event is pumped. The bound keeps the memory small instead.
+func (c *conversation) rememberResolvedLocked(requestID string, settled resolvedReply) {
 	if len(c.recentlyResolved) >= recentlyResolvedLimit {
 		// Evict arbitrarily: the map only needs to cover the re-announce window.
 		for key := range c.recentlyResolved {
@@ -372,35 +502,23 @@ func (c *conversation) rememberResolvedLocked(requestID string, reply any) {
 			break
 		}
 	}
-	c.recentlyResolved[requestID] = reply
-}
-
-// forgetResolved drops the remembered reply once the server reports the request
-// resolved, after which it cannot re-announce.
-func (c *conversation) forgetResolved(requestID string) {
-	if requestID == "" {
-		return
-	}
-	c.mu.Lock()
-	delete(c.recentlyResolved, requestID)
-	c.mu.Unlock()
+	c.recentlyResolved[requestID] = settled
 }
 
 // discardPending forgets a request the provider resolved on its own.
 func (c *conversation) discardPending(requestID string) {
+	refusal := &rpcError{Code: zcodeproto.CodeMethodNotFound, Message: "request was resolved by the provider"}
 	c.mu.Lock()
 	parked, ok := c.pending[requestID]
 	if ok {
-		delete(c.pending, requestID)
-		if parked.toolCallID != "" {
-			delete(c.byToolCallID, parked.toolCallID)
-		}
+		c.forgetPendingLocked(parked)
+		c.rememberResolvedLocked(requestID, resolvedReply{err: refusal})
 	}
 	c.mu.Unlock()
 	if ok {
 		// The server already settled it elsewhere; answering with a refusal
 		// clears the frame ids without pretending to decide.
-		parked.resolve(nil, &rpcError{Code: zcodeproto.CodeMethodNotFound, Message: "request was resolved by the provider"})
+		parked.resolve(nil, refusal)
 	}
 }
 
@@ -421,6 +539,7 @@ func (c *conversation) reconcilePending(pendingRequestIDs []string, known bool) 
 	for _, id := range pendingRequestIDs {
 		still[id] = struct{}{}
 	}
+	refusal := &rpcError{Code: zcodeproto.CodeMethodNotFound, Message: "request is no longer pending on the server"}
 	c.mu.Lock()
 	c.reconciling = false
 	var emit []ports.ChatEvent
@@ -432,19 +551,21 @@ func (c *conversation) reconcilePending(pendingRequestIDs []string, known bool) 
 		parked.deferred = false
 		if _, live := still[id]; live || !known {
 			// Without a server answer, keeping the request is the conservative
-			// choice: a stale card is recoverable, a lost real approval is not.
-			emit = append(emit, parked.emit)
+			// choice: a stale card is recoverable, a lost real approval is not. A
+			// record still prestaged has no event yet; its handler, finding the
+			// record no longer deferred, emits on arrival.
+			if !parked.prestaged {
+				emit = append(emit, parked.emit)
+			}
 			continue
 		}
-		delete(c.pending, id)
-		if parked.toolCallID != "" {
-			delete(c.byToolCallID, parked.toolCallID)
-		}
+		c.forgetPendingLocked(parked)
+		c.rememberResolvedLocked(id, resolvedReply{err: refusal})
 		refuse = append(refuse, parked)
 	}
 	c.mu.Unlock()
 	for _, parked := range refuse {
-		parked.resolve(nil, &rpcError{Code: zcodeproto.CodeMethodNotFound, Message: "request is no longer pending on the server"})
+		parked.resolve(nil, refusal)
 	}
 	for _, ev := range emit {
 		c.emit(ev)

@@ -3,6 +3,7 @@ package zcodeappserver
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -316,6 +317,34 @@ func TestProgressTailSuffixDiff(t *testing.T) {
 	}
 	if got := progress("zzz"); len(got) != 0 {
 		t.Fatalf("non-extending tail emitted (Phase 0 suffix-diff rule): %+v", got)
+	}
+
+	// stdout and stderr are diffed independently: concatenated, a growing
+	// stdout would shift stderr and no later tail would extend the last one.
+	both := func(stdout, stderr string) []string {
+		var deltas []string
+		for _, ev := range normalize(tracker, sessionEvent("tool.updated", "t-native",
+			`{"kind":"progress","toolCallId":"tc2","stdoutTail":`+strconvQuote(stdout)+`,"stderrTail":`+strconvQuote(stderr)+`}`)) {
+			if ev.Kind != ports.ChatEventCommandOutputDelta || ev.ProviderItemID != "tc2" {
+				t.Fatalf("progress event = %+v", ev)
+			}
+			deltas = append(deltas, ev.Delta)
+		}
+		return deltas
+	}
+	for _, step := range []struct {
+		stdout, stderr string
+		want           []string
+	}{
+		{"ab", "e", []string{"ab", "e"}},
+		{"abc", "e", []string{"c"}},
+		{"abc", "ef", []string{"f"}},
+		{"abcd", "efg", []string{"d", "g"}},
+		{"abcd", "efg", nil},
+	} {
+		if got := both(step.stdout, step.stderr); !reflect.DeepEqual(got, step.want) {
+			t.Fatalf("progress(%q, %q) = %v, want %v", step.stdout, step.stderr, got, step.want)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package zcodeappserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/zcodeappserver/zcodeproto"
@@ -21,11 +22,37 @@ func TestListModelsReadsSnapshotSettings(t *testing.T) {
 	if models[0].ID != "account:zai-individual-coding-plan/GLM-5.3" || !models[0].Default || models[0].DisplayName != "GLM 5.3" {
 		t.Fatalf("models[0] = %+v", models[0])
 	}
-	if len(models[0].Efforts) != 2 || models[0].Efforts[1] != "high" {
-		t.Fatalf("efforts = %v", models[0].Efforts)
+	if models[0].Efforts != nil {
+		t.Fatalf("efforts = %v advertised, but zcode has no per-turn thought level (U8)", models[0].Efforts)
 	}
 	if models[1].ID != "account:zai-individual-coding-plan/GLM-5.3-Flash" || models[1].Default {
 		t.Fatalf("models[1] = %+v", models[1])
+	}
+}
+
+func TestPerTurnEffortIsRefused(t *testing.T) {
+	d, srv := newTestDriver(t)
+	cfg := startConfig(t)
+	cfg.Effort = "low"
+	started, err := d.Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = started.Close() }()
+	if got := paramsMap(t, srv.awaitRequest(zcodeproto.MethodSessionCreate))["thoughtLevel"]; got != "low" {
+		t.Fatalf("session/create thoughtLevel = %v, want the launch effort", got)
+	}
+	conv := started.(*conversation)
+	if _, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{
+		Text: "x", Settings: ports.ChatTurnSettings{Effort: "high"},
+	}); !errors.Is(err, ports.ErrChatCapabilityUnavailable) {
+		t.Fatalf("SendTurn with a per-turn effort = %v, want ErrChatCapabilityUnavailable", err)
+	}
+	// The launch level, which is what every turn runs under anyway, is accepted.
+	if _, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{
+		Text: "x", Settings: ports.ChatTurnSettings{Effort: "low"},
+	}); err != nil {
+		t.Fatalf("SendTurn with the launch effort = %v", err)
 	}
 }
 

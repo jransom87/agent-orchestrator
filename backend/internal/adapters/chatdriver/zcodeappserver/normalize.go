@@ -274,25 +274,29 @@ func normalizeToolUpdated(payload zcodeproto.ToolUpdatedPayload, turn string, t 
 			Detail:         toolDetail(payload.ToolName, payload.Input, nil),
 		}}
 	case zcodeproto.ToolProgress:
-		tail := payload.StdoutTail
-		if tail == "" {
-			tail = payload.OutputPreview
-		}
-		if payload.StderrTail != "" {
-			tail += payload.StderrTail
+		stdout := payload.StdoutTail
+		if stdout == "" {
+			stdout = payload.OutputPreview
 		}
 		// Whether the tails are cumulative or incremental is unknown; Phase 0
-		// emits only the extension beyond the previous tail (DESIGN 4.2).
-		delta := t.progressDelta(payload.ToolCallID, tail)
-		if delta == "" {
-			return nil
+		// emits only the extension beyond the previous tail (DESIGN 4.2). Each
+		// stream is diffed against its own memory: concatenated, a growing
+		// stdout would shift stderr and no later tail would extend the last.
+		var events []ports.ChatEvent
+		for _, stream := range []struct{ key, tail string }{
+			{payload.ToolCallID + "\x00out", stdout},
+			{payload.ToolCallID + "\x00err", payload.StderrTail},
+		} {
+			if delta := t.progressDelta(stream.key, stream.tail); delta != "" {
+				events = append(events, ports.ChatEvent{
+					Kind:           ports.ChatEventCommandOutputDelta,
+					ProviderTurnID: turn,
+					ProviderItemID: payload.ToolCallID,
+					Delta:          delta,
+				})
+			}
 		}
-		return []ports.ChatEvent{{
-			Kind:           ports.ChatEventCommandOutputDelta,
-			ProviderTurnID: turn,
-			ProviderItemID: payload.ToolCallID,
-			Delta:          delta,
-		}}
+		return events
 	case zcodeproto.ToolResult:
 		extra := map[string]any{}
 		if len(payload.Result) > 0 {
@@ -452,14 +456,18 @@ func reasoningItem(partID, turn string) string {
 	return "zcode-reasoning:" + turn
 }
 
-// turnFor resolves a native turn id to AO's id, falling back to the open turn.
+// turnFor resolves a native turn id to AO's id, falling back to the turn in
+// flight: the open one, or the armed one whose start signal the pump has not
+// processed yet. Server requests are answered on their own goroutines ahead of
+// the pump, so an approval raised right after session/send would otherwise be
+// filed under no turn (DESIGN 3.5).
 func turnFor(t *turnTracker, native string) string {
 	if native != "" {
 		if minted := t.mintedFor(native); minted != "" {
 			return minted
 		}
 	}
-	return t.currentTurn()
+	return t.active()
 }
 
 func one(ev *ports.ChatEvent) []ports.ChatEvent {

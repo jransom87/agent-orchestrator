@@ -201,11 +201,15 @@ func (d *Driver) createSession(ctx context.Context, conv *conversation, cfg sess
 		return errors.New("session/create returned no session id")
 	}
 	conv.setSnapshot(snapshot)
-	conv.subscribe(createCtx, sessionID)
+	if err := conv.subscribe(createCtx, sessionID); err != nil {
+		_ = conv.Terminate()
+		return err
+	}
 
 	conv.mu.Lock()
 	conv.workspacePath = cfg.workspacePath
 	conv.launchMode = cfg.permissions
+	conv.launchEffort = cfg.effort
 	conv.preamble = cfg.systemPrompt
 	conv.mu.Unlock()
 	conv.start(sessionID)
@@ -238,13 +242,24 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	conv.mu.Lock()
 	conv.workspacePath = cfg.WorkspacePath
 	conv.launchMode = cfg.Permissions
+	conv.launchEffort = cfg.Effort
+	if !cfg.HasPriorTurns {
+		// The role has not reached the provider yet (the opening prompt is
+		// dispatched asynchronously), so it still leads the first turn, on a
+		// live reconnect as much as in a replacement process (DESIGN 4.3).
+		conv.preamble = cfg.SystemPrompt
+	}
 	conv.mu.Unlock()
 
 	if reconnected {
 		// The host preserved the initialized connection and its session, whose
 		// record already carries deliveryKind. Only the host-replayed server
-		// requests need reconciling against what the server still lists.
-		conv.start(cfg.ProviderConversationID)
+		// requests need reconciling against what the server still lists. The
+		// pump is not started here: the relay holds the replay until the service
+		// restores the durable running turn through ActivateLiveReconnect.
+		conv.mu.Lock()
+		conv.sessionID = cfg.ProviderConversationID
+		conv.mu.Unlock()
 		readCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 		defer cancel()
 		snapshot, readErr := conv.readSnapshot(readCtx, 0)
@@ -284,12 +299,10 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		sessionID = cfg.ProviderConversationID
 	}
 	conv.setSnapshot(snapshot)
-	conv.subscribe(resumeCtx, sessionID)
-	conv.mu.Lock()
-	if !cfg.HasPriorTurns {
-		conv.preamble = cfg.SystemPrompt
+	if err := conv.subscribe(resumeCtx, sessionID); err != nil {
+		_ = conv.Terminate()
+		return nil, fmt.Errorf("%w: %w", ports.ErrChatResumeFailed, err)
 	}
-	conv.mu.Unlock()
 	conv.start(sessionID)
 	return conv, nil
 }

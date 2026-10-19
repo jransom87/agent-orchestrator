@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,6 +80,10 @@ type scriptedServer struct {
 
 	envMu sync.Mutex
 	env   []string
+
+	// proc is what the injected spawn or host hands the driver; a test may
+	// prepend frames to its stdout to stand in for a host replay.
+	proc *process
 }
 
 func (s *scriptedServer) respondTo(method, resultJSON string) {
@@ -187,6 +192,9 @@ func (s *scriptedServer) awaitRequest(method string) frame {
 }
 
 func (s *scriptedServer) serve(serverReads io.Reader) {
+	// The real app-server exits on stdin EOF (U10), which ends the driver's
+	// read loop; mirror that by closing the server->client pipe too.
+	defer func() { _ = s.toClient.Close() }()
 	br := bufio.NewReader(serverReads)
 	for {
 		line, err := readFrame(br)
@@ -261,8 +269,37 @@ func newScriptedServer(t *testing.T) (*scriptedServer, *process) {
 		stdout: clientReads,
 		stop:   func() error { return serverWrites.Close() },
 	}
+	srv.proc = proc
 	t.Cleanup(func() { _ = serverWrites.Close() })
 	return srv, proc
+}
+
+// activateLive does what the chat service does right after a live reconnect:
+// hand the driver the durable running turn (or none) so it releases the replay.
+func activateLive(t *testing.T, conv ports.ChatConversation, providerTurnID string) {
+	t.Helper()
+	activator, ok := conv.(ports.ChatLiveReconnectActivator)
+	if !ok {
+		t.Fatal("live reconnect needs ports.ChatLiveReconnectActivator: the minted turn id lives only in daemon memory")
+	}
+	if err := activator.ActivateLiveReconnect(context.Background(), providerTurnID); err != nil {
+		t.Fatalf("ActivateLiveReconnect: %v", err)
+	}
+}
+
+func awaitEventsClosed(t *testing.T, events <-chan ports.ChatEvent, within time.Duration) {
+	t.Helper()
+	deadline := time.After(within)
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("Events() did not close")
+		}
+	}
 }
 
 // newTestDriver wires a Driver to a scripted server over in-memory pipes, so no
@@ -838,6 +875,23 @@ func TestStandingInstructionsLeadTheFirstTurnOnly(t *testing.T) {
 	if got := paramsMap(t, send)["content"]; got != "task three" {
 		t.Fatalf("resumed content = %q, want bare", got)
 	}
+
+	// A live reconnect before the opening prompt was dispatched still leads
+	// with the role: the preamble is armed on that branch as well.
+	d3, srv3, _ := newHostTestDriver(t, true, 0)
+	live, err := d3.Reconnect(context.Background(), ports.ChatResumeConfig{
+		SessionID: "ao-1", ProviderConversationID: "sess-1", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+		Permissions: ports.PermissionModeBypassPermissions, SystemPrompt: "You are the worker.", HasPriorTurns: false,
+	})
+	if err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+	defer func() { _ = live.Close() }()
+	activateLive(t, live, "")
+	sendTurn(t, live.(*conversation), "task four")
+	if got := paramsMap(t, srv3.awaitRequest(zcodeproto.MethodSessionSend))["content"]; got != "You are the worker.\n\ntask four" {
+		t.Fatalf("live-reconnect first content = %q, want the role to lead", got)
+	}
 }
 
 func TestTurnLifecycleFromStateUpdatedOnly(t *testing.T) {
@@ -1022,11 +1076,302 @@ func TestReconnectSkipsCreateResumeAndSubscribe(t *testing.T) {
 			t.Fatalf("live reconnect sent %s", method)
 		}
 	}
+	activateLive(t, conv, "")
 	sendTurn(t, conv.(*conversation), "hello")
 	send := srv.awaitRequest(zcodeproto.MethodSessionSend)
 	if rawID(*send.ID) != "43" {
 		t.Fatalf("send id = %s, want 43", *send.ID)
 	}
+}
+
+// busySnapshot is testSnapshot with the app-server reporting a running turn.
+var busySnapshot = strings.Replace(testSnapshot,
+	`"runtime":{"pendingRequestIds":[]}`, `"runtime":{"activeTurnId":"t-native","pendingRequestIds":[]}`, 1)
+
+func reconnectBusy(t *testing.T) (*conversation, *scriptedServer) {
+	t.Helper()
+	d, srv, _ := newHostTestDriver(t, true, 10)
+	srv.respondTo(zcodeproto.MethodSessionRead, busySnapshot)
+	conv, err := d.Reconnect(context.Background(), ports.ChatResumeConfig{
+		SessionID: "ao-1", ProviderConversationID: "sess-1", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+		Permissions: ports.PermissionModeBypassPermissions, HasPriorTurns: true,
+	})
+	if err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+	t.Cleanup(func() { _ = conv.Close() })
+	return conv.(*conversation), srv
+}
+
+func TestLiveReconnectReplayedCompletionSettlesTheRestoredTurn(t *testing.T) {
+	completion := `{"method":"session/event","params":{"type":"turn.completed","turnId":"t-native","sessionId":"sess-1","payload":{"response":"OK","resultType":"success"}}}`
+
+	t.Run("replay is held until the durable turn is restored", func(t *testing.T) {
+		conv, srv := reconnectBusy(t)
+		// The host replays the detach window the moment the daemon attaches,
+		// before the service has handed the driver the durable turn.
+		srv.push(completion)
+		if got := drainEvents(conv.Events(), 100*time.Millisecond); len(got) != 0 {
+			t.Fatalf("events released before activation: %+v", got)
+		}
+		activateLive(t, conv, "durable-uuid")
+		message := nextEvent(t, conv.Events(), ports.ChatEventMessageCompleted)
+		if message.ProviderTurnID != "durable-uuid" || message.Text != "OK" {
+			t.Fatalf("message.completed = %+v, want the restored durable turn", message)
+		}
+		completed := nextEvent(t, conv.Events(), ports.ChatEventTurnCompleted)
+		if completed.ProviderTurnID != "durable-uuid" || completed.NativeTurnID != "t-native" || completed.TurnState != domain.TurnStateCompleted {
+			t.Fatalf("turn.completed = %+v", completed)
+		}
+	})
+
+	t.Run("interrupt targets the restored turn", func(t *testing.T) {
+		conv, srv := reconnectBusy(t)
+		activateLive(t, conv, "durable-uuid")
+		if err := conv.Interrupt(context.Background(), "durable-uuid"); err != nil {
+			t.Fatalf("Interrupt: %v", err)
+		}
+		srv.awaitRequest(zcodeproto.MethodSessionStop)
+		srv.push(`{"method":"state.updated","params":{"reason":"prompt_failed"}}`)
+		completed := nextEvent(t, conv.Events(), ports.ChatEventTurnCompleted)
+		if completed.ProviderTurnID != "durable-uuid" || completed.TurnState != domain.TurnStateInterrupted {
+			t.Fatalf("turn.completed = %+v, want interrupted durable-uuid", completed)
+		}
+	})
+}
+
+func TestLiveReconnectWithUnownedActiveTurnIsInconclusive(t *testing.T) {
+	conv, _ := reconnectBusy(t)
+	err := conv.ActivateLiveReconnect(context.Background(), "")
+	if !errors.Is(err, ports.ErrChatRecoveryInconclusive) {
+		t.Fatalf("ActivateLiveReconnect with an unowned active turn = %v, want ErrChatRecoveryInconclusive", err)
+	}
+	// The service discards the conversation. No pump ever ran, so Close must
+	// drain the relay itself rather than leave it parked on the replay.
+	if err := conv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	awaitEventsClosed(t, conv.Events(), 5*time.Second)
+}
+
+func TestConversationClosedBeforeItsPumpDrainsTheRelay(t *testing.T) {
+	srv, proc := newScriptedServer(t)
+	conv := newConversation(proc, slog.New(slog.DiscardHandler), nil)
+	// The server writes startup notifications before it answers the first
+	// request (fixture line 2); with no pump they sit in the relay's queue.
+	srv.push(`{"method":"startup/storageState","params":{}}`)
+	srv.push(`{"method":"process/resourceSample","params":{}}`)
+	// A failed create terminates the conversation without ever starting it.
+	if err := conv.Terminate(); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	select {
+	case <-conv.conn.wait():
+	case <-time.After(time.Second):
+		t.Fatal("read loop did not end")
+	}
+	// The stream closes only once the relay has been drained and exited.
+	awaitEventsClosed(t, conv.Events(), time.Second)
+}
+
+func TestSubscribeRefusalFailsStartAndResume(t *testing.T) {
+	t.Run("start", func(t *testing.T) {
+		d, srv := newTestDriver(t)
+		srv.replyError(zcodeproto.MethodSessionSubscribe, zcodeproto.CodeMethodNotFound, "Method not found")
+		conv, err := d.Start(context.Background(), startConfig(t))
+		if err == nil || !strings.Contains(err.Error(), zcodeproto.MethodSessionSubscribe) {
+			t.Fatalf("Start err = %v, want a session/subscribe failure", err)
+		}
+		if conv != nil {
+			t.Fatal("a conversation was returned without session/event delivery")
+		}
+		if srv.sentMethod(zcodeproto.MethodSessionSend) {
+			t.Fatal("session/send written on a half-open session")
+		}
+	})
+	t.Run("resume", func(t *testing.T) {
+		d, srv := newTestDriver(t)
+		srv.replyError(zcodeproto.MethodSessionSubscribe, zcodeproto.CodeMethodNotFound, "Method not found")
+		conv, err := d.Resume(context.Background(), ports.ChatResumeConfig{
+			SessionID: "ao-1", ProviderConversationID: "sess-1", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+			Permissions: ports.PermissionModeBypassPermissions,
+		})
+		if !errors.Is(err, ports.ErrChatResumeFailed) || !strings.Contains(err.Error(), zcodeproto.MethodSessionSubscribe) {
+			t.Fatalf("Resume err = %v, want ErrChatResumeFailed from session/subscribe", err)
+		}
+		if conv != nil {
+			t.Fatal("a conversation was returned without session/event delivery")
+		}
+	})
+}
+
+func TestEvictedSendResumesSubscribesAndRetries(t *testing.T) {
+	conv, srv := startConversation(t)
+	var sends atomic.Int32
+	srv.onRequest(zcodeproto.MethodSessionSend, func(id, _ json.RawMessage) {
+		if sends.Add(1) == 1 {
+			srv.push(`{"id":` + string(id) + `,"error":{"code":-32004,"message":"Session is not active: sess-1"}}`)
+			return
+		}
+		srv.push(`{"method":"state.updated","params":{"reason":"prompt_started"}}`)
+		srv.respond(id, `{"accepted":true,"sessionId":"sess-1","stateRevision":2}`)
+	})
+	id := sendTurn(t, conv, "hello")
+
+	var order []string
+	var inputIDs []any
+	for _, f := range srv.frames() {
+		if f.ID == nil || f.Method == "" {
+			continue
+		}
+		if len(order) == 0 && f.Method != zcodeproto.MethodSessionSend {
+			continue // the create exchange
+		}
+		order = append(order, f.Method)
+		switch f.Method {
+		case zcodeproto.MethodSessionSend:
+			inputIDs = append(inputIDs, paramsMap(t, f)["inputId"])
+		case zcodeproto.MethodSessionResume:
+			params := paramsMap(t, f)
+			if params["sessionId"] != "sess-1" || params["workspace"] == nil {
+				t.Fatalf("session/resume after eviction = %s", f.Params)
+			}
+		}
+	}
+	want := []string{zcodeproto.MethodSessionSend, zcodeproto.MethodSessionResume, zcodeproto.MethodSessionSubscribe, zcodeproto.MethodSessionSend}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("frame order = %v, want %v", order, want)
+	}
+	if len(inputIDs) != 2 || inputIDs[0] != id || inputIDs[1] != id {
+		t.Fatalf("retry changed the inputId: %v", inputIDs)
+	}
+	got := drainEvents(conv.Events(), 150*time.Millisecond)
+	if countKind(got, ports.ChatEventTurnStarted) != 1 || countKind(got, ports.ChatEventTurnCompleted) != 0 {
+		t.Fatalf("events after the retried send = %+v", got)
+	}
+}
+
+func TestDeferredStartFailureAfterPromptStartedFollowsTurnStarted(t *testing.T) {
+	conv, srv := startConversation(t)
+	release := make(chan struct{})
+	srv.onRequest(zcodeproto.MethodSessionSend, func(id, _ json.RawMessage) {
+		srv.push(`{"method":"state.updated","params":{"reason":"prompt_started"}}`)
+		<-release
+		srv.push(`{"id":` + string(id) + `,"error":{"code":-32031,"message":"runtime rejected the prompt"}}`)
+	})
+	ref, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "hello"})
+	if err != nil {
+		t.Fatalf("SendTurn: %v", err)
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- conv.StartDeferredTurn(ref.ProviderTurnID) }()
+	if started := nextEvent(t, conv.Events(), ports.ChatEventTurnStarted); started.ProviderTurnID != ref.ProviderTurnID {
+		t.Fatalf("turn.started = %+v", started)
+	}
+	close(release)
+	if err := <-startErr; err == nil || !strings.Contains(err.Error(), "runtime rejected") {
+		t.Fatalf("StartDeferredTurn err = %v", err)
+	}
+	completed := nextEvent(t, conv.Events(), ports.ChatEventTurnCompleted)
+	if completed.ProviderTurnID != ref.ProviderTurnID || completed.TurnState != domain.TurnStateFailed {
+		t.Fatalf("turn.completed = %+v, want failed %q after turn.started", completed, ref.ProviderTurnID)
+	}
+	if _, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "again"}); err != nil {
+		t.Fatalf("SendTurn after the failure: %v", err)
+	}
+}
+
+func TestResolveSessionIDPrefersTheRuntimePreferencesRequest(t *testing.T) {
+	createWith := func(srv *scriptedServer, preferences bool, result string) {
+		srv.onRequest(zcodeproto.MethodSessionCreate, func(id, _ json.RawMessage) {
+			if preferences {
+				srv.push(`{"id":"server-1","method":"session/requestRuntimePreferences","params":{"sessionId":"sess-1"}}`)
+				srv.awaitReply("server-1")
+			}
+			srv.respond(id, result)
+		})
+	}
+
+	t.Run("session.id is not a source", func(t *testing.T) {
+		d, srv := newTestDriver(t)
+		createWith(srv, true, `{"session":{"id":"sess-wrong-key"},"settings":{"model":{}}}`)
+		conv, err := d.Start(context.Background(), startConfig(t))
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = conv.Close() }()
+		if got := conv.ProviderConversationID(); got != "sess-1" {
+			t.Fatalf("ProviderConversationID = %q, want the request's sess-1 (session.id is ignored)", got)
+		}
+	})
+
+	t.Run("mismatching snapshot loses and is logged", func(t *testing.T) {
+		var buf strings.Builder
+		d, srv := newTestDriver(t)
+		d.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		createWith(srv, true, strings.Replace(testSnapshot, `"sessionId":"sess-1"`, `"sessionId":"sess-other"`, 1))
+		conv, err := d.Start(context.Background(), startConfig(t))
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = conv.Close() }()
+		if got := conv.ProviderConversationID(); got != "sess-1" {
+			t.Fatalf("ProviderConversationID = %q, want the request's sess-1", got)
+		}
+		if !strings.Contains(buf.String(), "session id mismatch") {
+			t.Fatalf("mismatch not logged: %s", buf.String())
+		}
+	})
+
+	t.Run("snapshot alone is accepted", func(t *testing.T) {
+		d, srv := newTestDriver(t)
+		createWith(srv, false, testSnapshot)
+		conv, err := d.Start(context.Background(), startConfig(t))
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = conv.Close() }()
+		if got := conv.ProviderConversationID(); got != "sess-1" {
+			t.Fatalf("ProviderConversationID = %q", got)
+		}
+	})
+
+	t.Run("no source fails the start", func(t *testing.T) {
+		d, srv := newTestDriver(t)
+		createWith(srv, false, `{"session":{"id":"sess-wrong-key"},"settings":{"model":{}}}`)
+		if _, err := d.Start(context.Background(), startConfig(t)); err == nil || !strings.Contains(err.Error(), "returned no session id") {
+			t.Fatalf("Start err = %v, want a missing-id failure", err)
+		}
+	})
+}
+
+func TestUsagePollReadsAFreshSnapshotForContext(t *testing.T) {
+	t.Run("fresh projection", func(t *testing.T) {
+		conv, srv := startConversation(t)
+		srv.respondTo(zcodeproto.MethodSessionUsage, `{"inputTokens":10,"outputTokens":5,"cacheReadTokens":2,"totalTokens":15}`)
+		// The creation-time snapshot said 1200; the post-turn read says otherwise.
+		srv.respondTo(zcodeproto.MethodSessionRead, strings.Replace(testSnapshot, `"contextUsed":1200`, `"contextUsed":4321`, 1))
+		sendTurn(t, conv, "hello")
+		completeTurn(t, conv, srv)
+		usage := nextEvent(t, conv.Events(), ports.ChatEventUsage)
+		if usage.Usage == nil || !usage.Usage.TotalsKnown || usage.Usage.InputTokens != 10 || usage.Usage.CachedTokens != 2 {
+			t.Fatalf("usage = %+v", usage.Usage)
+		}
+		if !usage.Usage.ContextKnown || usage.Usage.ContextUsed != 4321 || usage.Usage.ContextWindow != 200000 {
+			t.Fatalf("context = %+v, want the post-turn session/read projection", usage.Usage)
+		}
+	})
+	t.Run("unreadable projection is omitted, not stale", func(t *testing.T) {
+		conv, srv := startConversation(t)
+		srv.respondTo(zcodeproto.MethodSessionUsage, `{"inputTokens":10,"outputTokens":5,"totalTokens":15}`)
+		srv.replyError(zcodeproto.MethodSessionRead, zcodeproto.CodeInternal, "boom")
+		sendTurn(t, conv, "hello")
+		completeTurn(t, conv, srv)
+		usage := nextEvent(t, conv.Events(), ports.ChatEventUsage)
+		if usage.Usage == nil || !usage.Usage.TotalsKnown || usage.Usage.ContextKnown || usage.Usage.ContextUsed != 0 {
+			t.Fatalf("usage = %+v, want totals only", usage.Usage)
+		}
+	})
 }
 
 func TestPersistentStartUsesTheHostWithProvenArgv(t *testing.T) {

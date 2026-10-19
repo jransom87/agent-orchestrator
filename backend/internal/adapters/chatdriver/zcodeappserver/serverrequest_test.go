@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -94,24 +96,40 @@ func TestReannouncedRequestIsNotASecondApproval(t *testing.T) {
 		t.Fatalf("post-resolution re-announce produced an approval: %+v", got)
 	}
 
-	// Once the server reports it resolved, the memory is dropped and a decision
-	// for it is no longer pending.
+	// Once the server reports it resolved, a decision for it is no longer
+	// pending — but a re-announce the server wrote before it processed the
+	// reply can still arrive after that event, and is answered from memory.
 	srv.push(`{"method":"session/event","params":{"type":"permission.resolved","payload":{"requestId":"r1","toolCallId":"tc1"}}}`)
 	nextEvent(t, conv.Events(), ports.ChatEventApprovalResolved)
 	if err := conv.ResolveRequest(context.Background(), "r1", ports.ChatDecision{ID: "deny"}); !errors.Is(err, ports.ErrChatRequestNotPending) {
 		t.Fatalf("ResolveRequest after resolution = %v", err)
 	}
+	pushPermission(srv, "server-6")
+	if afterResolved := srv.awaitReply("server-6"); string(afterResolved.Result) != string(first.Result) {
+		t.Fatalf("re-announce after permission.resolved = %+v, want the remembered %s", afterResolved, first.Result)
+	}
+	if got := drainEvents(conv.Events(), 100*time.Millisecond); countKind(got, ports.ChatEventApprovalRequested) != 0 {
+		t.Fatalf("re-announce after permission.resolved became a ghost approval: %+v", got)
+	}
+}
+
+// replayOnAttach makes the scripted host replay frames the moment the daemon
+// attaches: they are the first bytes on the wire, ahead of any response, which
+// is the order the persistent host produces.
+func replayOnAttach(srv *scriptedServer, frames ...string) {
+	srv.proc.stdout = io.MultiReader(strings.NewReader(strings.Join(frames, "\n")+"\n"), srv.proc.stdout)
+}
+
+func permissionFrame(frameID string) string {
+	return `{"id":"` + frameID + `","method":"interaction/requestPermission","params":` + permissionRequestParams + `}`
 }
 
 func TestReconnectReplayOfResolvedRequestEmitsNoApproval(t *testing.T) {
 	d, srv, _ := newHostTestDriver(t, true, 10)
-	// The host replays the unanswered frame the moment the daemon attaches.
-	go pushPermission(srv, "server-7")
-	srv.onRequest(zcodeproto.MethodSessionRead, func(id, _ json.RawMessage) {
-		srv.awaitFrame(func(f frame) bool { return f.Method == zcodeproto.MethodSessionRead })
-		time.Sleep(50 * time.Millisecond)
-		srv.respond(id, testSnapshot) // runtime.pendingRequestIds: []
-	})
+	replayOnAttach(srv, permissionFrame("server-7"))
+	// session/read answers runtime.pendingRequestIds: [] (the default snapshot)
+	// right away: the replayed frame was registered from the read loop ahead of
+	// that response, so no timing gap is needed for reconciliation to see it.
 	conv, err := d.Reconnect(context.Background(), ports.ChatResumeConfig{
 		SessionID: "ao-1", ProviderConversationID: "sess-1", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
 		Permissions: ports.PermissionModeBypassPermissions,
@@ -120,6 +138,7 @@ func TestReconnectReplayOfResolvedRequestEmitsNoApproval(t *testing.T) {
 		t.Fatalf("Reconnect: %v", err)
 	}
 	defer func() { _ = conv.Close() }()
+	activateLive(t, conv, "")
 
 	reply := srv.awaitReply("server-7")
 	if reply.Error == nil || reply.Error.Code != zcodeproto.CodeMethodNotFound {
@@ -131,19 +150,20 @@ func TestReconnectReplayOfResolvedRequestEmitsNoApproval(t *testing.T) {
 	if err := conv.ResolveRequest(context.Background(), "r1", ports.ChatDecision{ID: "deny"}); !errors.Is(err, ports.ErrChatRequestNotPending) {
 		t.Fatalf("ResolveRequest = %v", err)
 	}
+	// A re-announce of the refused request is answered from memory, not parked.
+	pushPermission(srv, "server-9")
+	if late := srv.awaitReply("server-9"); late.Error == nil || late.Error.Code != zcodeproto.CodeMethodNotFound {
+		t.Fatalf("re-announce after reconciliation = %+v, want the remembered refusal", late)
+	}
+	if got := drainEvents(conv.Events(), 100*time.Millisecond); countKind(got, ports.ChatEventApprovalRequested) != 0 {
+		t.Fatalf("re-announce after reconciliation became an approval: %+v", got)
+	}
 }
 
 func TestReconnectReplayOfStillPendingRequestIsEmittedOnce(t *testing.T) {
 	d, srv, _ := newHostTestDriver(t, true, 10)
-	go func() {
-		pushPermission(srv, "server-7")
-		pushPermission(srv, "server-8")
-	}()
-	pending := strings.Replace(testSnapshot, `"pendingRequestIds":[]`, `"pendingRequestIds":["r1"]`, 1)
-	srv.onRequest(zcodeproto.MethodSessionRead, func(id, _ json.RawMessage) {
-		time.Sleep(50 * time.Millisecond)
-		srv.respond(id, pending)
-	})
+	replayOnAttach(srv, permissionFrame("server-7"), permissionFrame("server-8"))
+	srv.respondTo(zcodeproto.MethodSessionRead, strings.Replace(testSnapshot, `"pendingRequestIds":[]`, `"pendingRequestIds":["r1"]`, 1))
 	conv, err := d.Reconnect(context.Background(), ports.ChatResumeConfig{
 		SessionID: "ao-1", ProviderConversationID: "sess-1", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
 		Permissions: ports.PermissionModeBypassPermissions,
@@ -152,6 +172,7 @@ func TestReconnectReplayOfStillPendingRequestIsEmittedOnce(t *testing.T) {
 		t.Fatalf("Reconnect: %v", err)
 	}
 	defer func() { _ = conv.Close() }()
+	activateLive(t, conv, "")
 	got := drainEvents(conv.Events(), 200*time.Millisecond)
 	if countKind(got, ports.ChatEventApprovalRequested) != 1 {
 		t.Fatalf("approval.requested count = %d: %+v", countKind(got, ports.ChatEventApprovalRequested), got)
@@ -178,6 +199,112 @@ func TestApprovalWaitExpiryRefusesEveryWaitingID(t *testing.T) {
 	}
 	if err := conv.ResolveRequest(context.Background(), "r1", ports.ChatDecision{ID: "deny"}); !errors.Is(err, ports.ErrChatRequestNotPending) {
 		t.Fatalf("ResolveRequest after expiry = %v", err)
+	}
+	// A re-announce after expiry gets the same refusal, not a new card.
+	pushPermission(srv, "server-5")
+	if late := srv.awaitReply("server-5"); late.Error == nil || late.Error.Code != zcodeproto.CodeMethodNotFound {
+		t.Fatalf("re-announce after expiry = %+v, want the remembered refusal", late)
+	}
+	if got := drainEvents(conv.Events(), 100*time.Millisecond); countKind(got, ports.ChatEventApprovalRequested) != 0 {
+		t.Fatalf("re-announce after expiry became an approval: %+v", got)
+	}
+}
+
+func TestParkedRequestBeforeAnyStartSignalUsesTheArmedTurn(t *testing.T) {
+	conv, srv := startConversation(t)
+	// session/send is acknowledged but no start signal has been pumped: the
+	// request's turnId is unknown to the tracker and nothing is open yet.
+	id := sendTurn(t, conv, "hello")
+	pushPermission(srv, "server-3")
+	requested := nextEvent(t, conv.Events(), ports.ChatEventApprovalRequested)
+	if requested.ProviderTurnID != id {
+		t.Fatalf("approval turn = %q, want the armed %q (DESIGN 3.5: the current pending turn)", requested.ProviderTurnID, id)
+	}
+}
+
+func TestResolveWithCancelledContextLeavesTheRequestPending(t *testing.T) {
+	conv, srv := startConversation(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	pushPermission(srv, "server-3")
+	nextEvent(t, conv.Events(), ports.ChatEventApprovalRequested)
+	if err := conv.ResolveRequest(cancelled, "r1", ports.ChatDecision{ID: "allow-once"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ResolveRequest with a cancelled context = %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if srv.countFrames(func(f frame) bool { return f.Method == "" && f.ID != nil && rawID(*f.ID) == "server-3" }) != 0 {
+		t.Fatal("a failed ResolveRequest delivered the decision anyway")
+	}
+	// The real answer lands and reports success: delivered means delivered.
+	if err := conv.ResolveRequest(context.Background(), "r1", ports.ChatDecision{ID: "allow-once"}); err != nil {
+		t.Fatalf("ResolveRequest: %v", err)
+	}
+	srv.awaitReply("server-3")
+
+	srv.push(`{"id":"server-6","method":"interaction/requestUserInput","params":` + userInputParams + `}`)
+	nextEvent(t, conv.Events(), ports.ChatEventInputRequested)
+	if err := conv.ResolveInput(cancelled, "q1", ports.ChatInputResponse{Action: ports.ChatInputActionAccept}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ResolveInput with a cancelled context = %v", err)
+	}
+	if err := conv.ResolveInput(context.Background(), "q1", ports.ChatInputResponse{Action: ports.ChatInputActionAccept}); err != nil {
+		t.Fatalf("ResolveInput: %v", err)
+	}
+	srv.awaitReply("server-6")
+}
+
+func TestStructuredInputOnAPermissionRequestIsRefusedAndLeftPending(t *testing.T) {
+	conv, srv := startConversation(t)
+	pushPermission(srv, "server-3")
+	nextEvent(t, conv.Events(), ports.ChatEventApprovalRequested)
+	err := conv.ResolveInput(context.Background(), "r1", ports.ChatInputResponse{Action: ports.ChatInputActionAccept})
+	if !errors.Is(err, ports.ErrChatDecisionNotOffered) || errors.Is(err, ports.ErrChatRequestNotPending) {
+		t.Fatalf("ResolveInput on a permission request = %v, want ErrChatDecisionNotOffered (it is still pending)", err)
+	}
+	if err := conv.ResolveRequest(context.Background(), "r1", ports.ChatDecision{ID: "allow-once"}); err != nil {
+		t.Fatalf("the real answer was refused: %v", err)
+	}
+	srv.awaitReply("server-3")
+}
+
+func TestHeaderKeyedInputAnswersAreWrappedAsAnswers(t *testing.T) {
+	conv, srv := startConversation(t)
+	srv.push(`{"id":"server-6","method":"interaction/requestUserInput","params":` + userInputParams + `}`)
+	nextEvent(t, conv.Events(), ports.ChatEventInputRequested)
+	// A generic AO client answers the published schema, keyed by header.
+	if err := conv.ResolveInput(context.Background(), "q1", ports.ChatInputResponse{
+		Action: ports.ChatInputActionAccept, Content: map[string]any{"proceed": "yes"},
+	}); err != nil {
+		t.Fatalf("ResolveInput: %v", err)
+	}
+	reply := srv.awaitReply("server-6")
+	if !jsonEqual(reply.Result, json.RawMessage(`{"action":"accept","content":{"answers":{"Proceed?":"yes"}}}`)) {
+		t.Fatalf("reply = %s, want the U6 static shape keyed by question text", reply.Result)
+	}
+}
+
+func TestUserInputReplyContent(t *testing.T) {
+	questions := []zcodeproto.Question{
+		{Question: "Which?", Header: "which"},
+		{Question: "Why?"},
+		{Header: "", Question: ""},
+	}
+	cases := []struct {
+		name    string
+		content map[string]any
+		want    map[string]any
+	}{
+		{"already shaped", map[string]any{"answers": map[string]any{"Which?": "a"}}, map[string]any{"answers": map[string]any{"Which?": "a"}}},
+		{"header and text keys", map[string]any{"which": "a", "Why?": "b", "answer_2": "c"},
+			map[string]any{"answers": map[string]any{"Which?": "a", "Why?": "b", "answer_2": "c"}}},
+		{"unknown keys pass through", map[string]any{"extra": 1}, map[string]any{"answers": map[string]any{"extra": 1}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := userInputReplyContent(questions, tc.content); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("userInputReplyContent = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

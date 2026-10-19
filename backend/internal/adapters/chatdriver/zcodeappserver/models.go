@@ -51,13 +51,13 @@ func (c *conversation) ListModels(context.Context) ([]ports.ChatModel, error) {
 		if display == "" {
 			display = entry.Ref.ModelID
 		}
-		var efforts []string
-		if entry.Reasoning != nil {
-			efforts = append(efforts, entry.Reasoning.Levels...)
-		}
-		models = append(models, ports.ChatModel{
-			ID: id, DisplayName: display, Default: id == current, Efforts: efforts,
-		})
+		// Efforts stay empty (the port reads empty as "the model takes none"):
+		// reasoning.levels is advertised in the snapshot, but session/send has
+		// no thought-level field and the only known setter is session/create's
+		// thoughtLevel, so a per-turn effort would be silently ignored. Until P7
+		// proves a per-turn or setThoughtLevel path (U8), SendTurn refuses one
+		// that differs from the launch level instead.
+		models = append(models, ports.ChatModel{ID: id, DisplayName: display, Default: id == current})
 	}
 	return models, nil
 }
@@ -71,8 +71,8 @@ func (c *conversation) SetModel(ctx context.Context, id string) error {
 		return fmt.Errorf("%w: model id %q is not providerId/modelId", ports.ErrChatConfigOptionInvalid, id)
 	}
 	var snapshot zcodeproto.Snapshot
-	if err := c.conn.request(ctx, zcodeproto.MethodSessionSetModel, zcodeproto.SessionSetModelParams{
-		SessionID: c.sessionID, Model: selection,
+	if err := c.sessionRequest(ctx, zcodeproto.MethodSessionSetModel, zcodeproto.SessionSetModelParams{
+		SessionID: c.ProviderConversationID(), Model: selection,
 	}, &snapshot); err != nil {
 		return fmt.Errorf("%s: %w", zcodeproto.MethodSessionSetModel, err)
 	}

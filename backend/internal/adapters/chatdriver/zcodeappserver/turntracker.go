@@ -37,6 +37,11 @@ type turnTracker struct {
 	current string
 	native  string
 	open    bool
+	// startedOut is set once the pump has put the open turn's turn.started on
+	// the event stream, and failAfterStart holds the failed completion a cancel
+	// left for the pump to emit right after it (the two must not be reordered).
+	startedOut     bool
+	failAfterStart *ports.ChatEvent
 
 	// textSource latches which delta kind carried assistant text this turn so
 	// model.streaming and part.delta never double the text (DESIGN 4.2).
@@ -70,25 +75,92 @@ func (t *turnTracker) prepare(id string) {
 	t.pending = id
 }
 
-// cancel disarms a prepared id after the session/send request failed. It
-// reports whether turn.started had already been emitted for that id, in which
-// case the caller must emit a failed turn.completed so the controller cannot
-// stay Busy.
-func (t *turnTracker) cancel(id string) (started bool) {
+// disarm drops a prepared id whose session/send was never written.
+func (t *turnTracker) disarm(id string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.pending == id {
 		t.pending = ""
 	}
-	if t.open && t.current == id {
-		t.open = false
-		t.current = ""
-		t.native = ""
-		t.textSource = ""
-		t.replyItemID = ""
+}
+
+// cancel disarms a prepared id after the session/send request failed. When the
+// turn was already observed started, a failed turn.completed must reach the
+// stream so the controller cannot stay Busy — and it must follow the pump's
+// turn.started, which the pump emits on its own goroutine after observeStarted
+// returns. So the caller emits the failure itself only when the pump reports
+// turn.started already out (emitNow); otherwise the failure is parked here and
+// the pump emits it right after turn.started (markStartedEmitted).
+func (t *turnTracker) cancel(id string, failure ports.ChatEvent) (emitNow bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.pending == id {
+		t.pending = ""
+	}
+	if !t.open || t.current != id {
+		return false
+	}
+	startedOut := t.startedOut
+	t.closeLocked()
+	if startedOut {
 		return true
 	}
+	t.failAfterStart = &failure
 	return false
+}
+
+// markStartedEmitted records that the pump put turn.started for id on the
+// stream and hands back the failed completion a cancel parked for it, if any.
+func (t *turnTracker) markStartedEmitted(id string) *ports.ChatEvent {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.open && t.current == id {
+		t.startedOut = true
+	}
+	if t.failAfterStart != nil && t.failAfterStart.ProviderTurnID == id {
+		failure := t.failAfterStart
+		t.failAfterStart = nil
+		return failure
+	}
+	return nil
+}
+
+// adopt opens the turn a previous daemon started (live reconnect): minted is
+// the durable id the controller restored, native the app-server's id for it
+// when session/read reported one. Nothing is emitted — the controller already
+// owns the turn — but every later signal for it now correlates, so a completion
+// replayed from the detach window settles it instead of being dropped.
+func (t *turnTracker) adopt(minted, native string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pending = ""
+	t.openLocked(minted, native)
+	t.startedOut = true
+}
+
+// openLocked opens a turn under the lock, resetting the per-turn latches.
+func (t *turnTracker) openLocked(id, native string) {
+	t.open = true
+	t.current = id
+	t.native = native
+	t.textSource = ""
+	t.replyItemID = ""
+	t.startedOut = false
+	t.toolTails = make(map[string]string)
+	if native != "" {
+		t.nativeByMinted[id] = native
+		t.mintedByNative[native] = id
+	}
+}
+
+// closeLocked settles the open turn under the lock.
+func (t *turnTracker) closeLocked() {
+	t.open = false
+	t.current = ""
+	t.native = ""
+	t.textSource = ""
+	t.replyItemID = ""
+	t.startedOut = false
 }
 
 // observeStarted folds one of the three start signals. It returns the
@@ -116,16 +188,7 @@ func (t *turnTracker) observeStarted(native string) *ports.ChatEvent {
 		// nothing AO can correlate; dropping it is safer than inventing a turn.
 		return nil
 	}
-	t.open = true
-	t.current = id
-	t.native = native
-	t.textSource = ""
-	t.replyItemID = ""
-	t.toolTails = make(map[string]string)
-	if native != "" {
-		t.nativeByMinted[id] = native
-		t.mintedByNative[native] = id
-	}
+	t.openLocked(id, native)
 	return &ports.ChatEvent{Kind: ports.ChatEventTurnStarted, ProviderTurnID: id, NativeTurnID: native}
 }
 
@@ -145,11 +208,7 @@ func (t *turnTracker) observeCompleted(state domain.TurnState, err error) *ports
 		TurnState:      state,
 		Err:            err,
 	}
-	t.open = false
-	t.current = ""
-	t.native = ""
-	t.textSource = ""
-	t.replyItemID = ""
+	t.closeLocked()
 	return ev
 }
 
@@ -176,23 +235,27 @@ func (t *turnTracker) replyItemKnown() bool {
 	return t.replyItemID != ""
 }
 
-// progressDelta returns the part of a tool's new output tail that extends the
-// previous one, and remembers the new tail. A tail that does not extend the
-// last one yields "" (DESIGN 4.2: cumulative vs incremental is unknown).
-func (t *turnTracker) progressDelta(toolCallID, tail string) string {
+// progressDelta returns the part of a tool stream's new output tail that
+// extends the previous one, and remembers the new tail. The key names the tool
+// call and the stream (stdout and stderr are remembered separately). A tail
+// that does not extend the last one yields "" (DESIGN 4.2: cumulative vs
+// incremental is unknown).
+func (t *turnTracker) progressDelta(key, tail string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	previous := t.toolTails[toolCallID]
-	t.toolTails[toolCallID] = tail
+	previous := t.toolTails[key]
+	t.toolTails[key] = tail
 	if !strings.HasPrefix(tail, previous) {
 		return ""
 	}
 	return tail[len(previous):]
 }
 
-// active is the turn an interrupt without a name targets: the open turn, or
-// the prepared one whose session/send was acknowledged but whose
-// prompt_started has not been pumped yet.
+// active is the turn in flight as AO sees it: the open turn, or the prepared
+// one whose session/send is written but whose prompt_started has not been
+// pumped yet. An interrupt without a name targets it, and so does every
+// notification or server request that arrives before the start signal is
+// pumped (DESIGN 3.5: "the current pending turn").
 func (t *turnTracker) active() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()

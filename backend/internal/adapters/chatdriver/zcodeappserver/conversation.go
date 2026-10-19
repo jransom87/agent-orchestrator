@@ -47,21 +47,25 @@ type conversation struct {
 	proc *process
 	log  *slog.Logger
 
-	sessionID       string
-	workspacePath   string
-	providerScopeID string
+	sessionID     string
+	workspacePath string
 	// launchMode is the permission mode the session was created or resumed
 	// with; a per-turn approval setting that differs is refused (U5).
 	launchMode ports.PermissionMode
-	events     chan ports.ChatEvent
+	// launchEffort is the thought level the session was created with. zcode
+	// has no per-turn thought level, so a per-turn effort that differs is
+	// refused rather than silently ignored (U8).
+	launchEffort string
+	events       chan ports.ChatEvent
 
 	mu      sync.Mutex
 	pending map[string]*parkedRequest
 	// byToolCallID indexes parked permission requests by toolCallId, because
 	// permission.resolved may omit requestId (`Uhr`).
 	byToolCallID map[string]string
-	// recentlyResolved answers a re-announce that crossed the reply on the wire.
-	recentlyResolved map[string]any
+	// recentlyResolved answers a re-announce that crossed the reply on the wire
+	// with whatever settled the request: AO's decision or a refusal.
+	recentlyResolved map[string]resolvedReply
 	closed           bool
 	// reconciling is set while a live reconnect has not yet reconciled the
 	// host-replayed server requests against the server's pending list.
@@ -88,6 +92,10 @@ type conversation struct {
 	sendTimeout    time.Duration
 	usagePoll      bool
 
+	// pumpStarted (under mu) records that the pump owns the relay's output.
+	// Until then the relay queues every notification; a conversation that
+	// closes before its pump starts drains the queue so the relay can exit.
+	pumpStarted  bool
 	pumpDone     chan struct{}
 	eventsMu     sync.RWMutex
 	eventsClosed bool
@@ -105,6 +113,11 @@ var _ ports.ChatInputResponder = (*conversation)(nil)
 var _ ports.ChatProviderPreserver = (*conversation)(nil)
 var _ ports.ChatProviderTerminator = (*conversation)(nil)
 var _ ports.ChatLiveReconnector = (*conversation)(nil)
+
+// Asserted because the minted<->native turn correlation lives only in daemon
+// memory: without this hook a turn running across a daemon restart could never
+// settle (the controller restores the durable id through it, DESIGN 3.8).
+var _ ports.ChatLiveReconnectActivator = (*conversation)(nil)
 var _ ports.ChatModelLister = (*conversation)(nil)
 
 func newConversation(proc *process, log *slog.Logger, runtimeHeaders runtimeHeadersResolver) *conversation {
@@ -114,7 +127,7 @@ func newConversation(proc *process, log *slog.Logger, runtimeHeaders runtimeHead
 		events:           make(chan ports.ChatEvent, eventBuffer),
 		pending:          make(map[string]*parkedRequest),
 		byToolCallID:     make(map[string]string),
-		recentlyResolved: make(map[string]any),
+		recentlyResolved: make(map[string]resolvedReply),
 		turns:            newTurnTracker(),
 		runtimeHeaders:   runtimeHeaders,
 		approvalWait:     approvalWait,
@@ -125,7 +138,7 @@ func newConversation(proc *process, log *slog.Logger, runtimeHeaders runtimeHead
 		// read loop starts, so the reconcile gate must be up before newConnAt.
 		reconciling: proc.reconnected,
 	}
-	c.conn = newConnAt(proc.stdin, proc.stdout, log, c.handleServerRequest, proc.nextRequestID)
+	c.conn = newConnAt(proc.stdin, proc.stdout, log, c.handleServerRequest, c.noteServerRequest, proc.nextRequestID)
 	return c
 }
 
@@ -136,7 +149,46 @@ func (c *conversation) start(sessionID string) {
 	c.mu.Lock()
 	c.sessionID = sessionID
 	c.mu.Unlock()
-	go c.pump()
+	c.startPump()
+}
+
+// startPump releases the relay's output to the pump exactly once.
+func (c *conversation) startPump() {
+	c.mu.Lock()
+	started := c.pumpStarted
+	c.pumpStarted = true
+	c.mu.Unlock()
+	if !started {
+		go c.pump()
+	}
+}
+
+// ActivateLiveReconnect seeds the turn tracker with the durable running turn
+// the controller restored and only then starts the pump
+// (ports.ChatLiveReconnectActivator). The host replays the notifications of the
+// detach window the moment the daemon attaches; released before the seed, a
+// replayed turn.completed would find nothing open, settle nothing, and leave
+// the controller Busy for good.
+func (c *conversation) ActivateLiveReconnect(_ context.Context, providerTurnID string) error {
+	if !c.proc.reconnected {
+		return nil
+	}
+	c.mu.Lock()
+	native := c.snapshot.Runtime.ActiveTurnID
+	c.mu.Unlock()
+	providerTurnID = strings.TrimSpace(providerTurnID)
+	switch {
+	case providerTurnID != "":
+		// Adopted even when the snapshot reports no active turn: runtime.activeTurnId
+		// is STATIC (U11) and the completion may be sitting in the replay. A turn
+		// the provider did finish without AO recording it is recovered by Stop.
+		c.turns.adopt(providerTurnID, native)
+	case native != "":
+		return fmt.Errorf("%w: app-server reports active turn %q but no durable running turn",
+			ports.ErrChatRecoveryInconclusive, native)
+	}
+	c.startPump()
+	return nil
 }
 
 // ProviderConversationID is the zcode session id AO persists for resume.
@@ -185,17 +237,24 @@ func (c *conversation) pump() {
 					continue
 				}
 				// The provider resolved it (possibly elsewhere), so any card AO is
-				// still showing is stale and the re-announce window is over.
+				// still showing is stale. The remembered reply is kept: a re-announce
+				// written before the server processed the answer may still be on
+				// its way to park.
 				c.discardPending(ev.RequestID)
-				c.forgetResolved(ev.RequestID)
 			case ports.ChatEventInputResolved:
 				c.discardPending(ev.RequestID)
-				c.forgetResolved(ev.RequestID)
 			case ports.ChatEventTurnCompleted:
 				ev = c.settleInterrupt(ev)
 				c.maybePollUsage(n, ev.ProviderTurnID)
 			}
 			c.emit(ev)
+			if ev.Kind == ports.ChatEventTurnStarted {
+				// A session/send that failed after prompt_started was pumped
+				// leaves its failed completion here so it follows turn.started.
+				if failure := c.turns.markStartedEmitted(ev.ProviderTurnID); failure != nil {
+					c.emit(*failure)
+				}
+			}
 		}
 	}
 
@@ -237,7 +296,7 @@ func (c *conversation) maybePollUsage(n notification, turnID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), usagePollTimeout)
 		defer cancel()
 		var result zcodeproto.SessionUsageResult
-		if err := c.conn.request(ctx, zcodeproto.MethodSessionUsage,
+		if err := c.sessionRequest(ctx, zcodeproto.MethodSessionUsage,
 			zcodeproto.SessionUsageParams{SessionID: c.ProviderConversationID()}, &result); err != nil {
 			c.log.Debug("session/usage read failed", "error", err)
 			return
@@ -253,13 +312,16 @@ func (c *conversation) maybePollUsage(n notification, turnID string) {
 			InputTokens: result.InputTokens, OutputTokens: result.OutputTokens,
 			CachedTokens: result.CacheReadTokens, TotalTokens: total, TotalsKnown: true,
 		}
-		c.mu.Lock()
-		if window := c.snapshot.Projection.ContextWindow; window > 0 {
-			usage.ContextUsed = c.snapshot.Projection.ContextUsed
+		// Context occupancy comes from a snapshot read after the turn, never the
+		// cached one: a creation-time value stamped ContextKnown would overwrite
+		// the live readout with a stale number. Unreadable means omitted.
+		if snapshot, err := c.readSnapshot(ctx, 0); err != nil {
+			c.log.Debug("session/read after usage poll failed; context omitted", "error", err)
+		} else if window := snapshot.Projection.ContextWindow; window > 0 {
+			usage.ContextUsed = snapshot.Projection.ContextUsed
 			usage.ContextWindow = window
 			usage.ContextKnown = true
 		}
-		c.mu.Unlock()
 		c.emit(ports.ChatEvent{Kind: ports.ChatEventUsage, ProviderTurnID: turnID, Usage: usage})
 	}()
 }
@@ -351,6 +413,14 @@ func (c *conversation) SendTurn(ctx context.Context, msg ports.ChatUserMessage) 
 		return ports.ChatTurnRef{}, fmt.Errorf("%w: zcode turns run under the session's launch mode; requested %q",
 			ports.ErrChatPermissionModeUnsupported, msg.Settings.Approval)
 	}
+	if msg.Settings.Effort != "" && msg.Settings.Effort != c.launchEffort {
+		// session/send carries no thought level (`QXt`); only session/create's
+		// thoughtLevel is known (STATIC, U8). Refusing is honest: ListModels
+		// advertises no efforts, so an explicit one is a value the provider did
+		// not offer, and dropping it silently would misreport what ran.
+		return ports.ChatTurnRef{}, fmt.Errorf("%w: zcode has no per-turn thought level (U8); requested %q",
+			ports.ErrChatCapabilityUnavailable, msg.Settings.Effort)
+	}
 
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -376,7 +446,7 @@ func (c *conversation) DiscardDeferredTurn(providerTurnID string) {
 		c.prepared = nil
 	}
 	c.mu.Unlock()
-	c.turns.cancel(providerTurnID)
+	c.turns.disarm(providerTurnID)
 }
 
 // StartDeferredTurn writes the session/send for a prepared turn. The tracker is
@@ -422,25 +492,21 @@ func (c *conversation) StartDeferredTurn(providerTurnID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.sendTimeout)
 	defer cancel()
 	var result zcodeproto.SessionSendResult
-	err := c.conn.request(ctx, zcodeproto.MethodSessionSend, params, &result)
-	if err != nil && isSessionEvicted(err) {
-		// The server evicted the resident session (DESIGN 3.7), not the process:
-		// reload it once and retry the same send.
-		if resumeErr := c.resumeEvicted(ctx); resumeErr == nil {
-			err = c.conn.request(ctx, zcodeproto.MethodSessionSend, params, &result)
-		}
-	}
+	err := c.sessionRequest(ctx, zcodeproto.MethodSessionSend, params, &result)
 	if err == nil && !result.Accepted {
 		err = errors.New("session/send was not accepted")
 	}
 	if err != nil {
 		// Surfaced verbatim, with no auth interpretation: -32031 in particular is
-		// not credentials-specific (zcodeproto/errors.go).
-		if c.turns.cancel(turn.id) {
-			c.emit(ports.ChatEvent{
-				Kind: ports.ChatEventTurnCompleted, ProviderTurnID: turn.id,
-				TurnState: domain.TurnStateFailed, Err: ports.NewChatProviderFailure(err.Error(), "", nil),
-			})
+		// not credentials-specific (zcodeproto/errors.go). If prompt_started was
+		// already pumped, the failed completion goes out strictly after the
+		// pump's turn.started (see turnTracker.cancel).
+		failure := ports.ChatEvent{
+			Kind: ports.ChatEventTurnCompleted, ProviderTurnID: turn.id,
+			TurnState: domain.TurnStateFailed, Err: ports.NewChatProviderFailure(err.Error(), "", nil),
+		}
+		if c.turns.cancel(turn.id, failure) {
+			c.emit(failure)
 		}
 		return fmt.Errorf("%s: %w%s", zcodeproto.MethodSessionSend, err, errorData(err))
 	}
@@ -466,7 +532,7 @@ func (c *conversation) Interrupt(ctx context.Context, providerTurnID string) err
 	c.interrupting = providerTurnID
 	sessionID := c.sessionID
 	c.mu.Unlock()
-	if err := c.conn.request(ctx, zcodeproto.MethodSessionStop, zcodeproto.SessionStopParams{SessionID: sessionID}, nil); err != nil {
+	if err := c.sessionRequest(ctx, zcodeproto.MethodSessionStop, zcodeproto.SessionStopParams{SessionID: sessionID}, nil); err != nil {
 		c.mu.Lock()
 		if c.interrupting == providerTurnID {
 			c.interrupting = ""
@@ -478,21 +544,24 @@ func (c *conversation) Interrupt(ctx context.Context, providerTurnID string) err
 }
 
 // subscribe asks for session/event delivery (STATIC, U1 settled). A refusal is
-// not fatal: the state.updated floor still settles turns.
-func (c *conversation) subscribe(ctx context.Context, sessionID string) {
+// fatal to opening the conversation: without the subscription no assistant
+// text, tool activity or turn.completed.response ever arrives, so every turn
+// would settle empty while Capabilities still promised streaming and tools.
+func (c *conversation) subscribe(ctx context.Context, sessionID string) error {
 	var result zcodeproto.SessionSubscribeResult
 	if err := c.conn.request(ctx, zcodeproto.MethodSessionSubscribe, zcodeproto.SessionSubscribeParams{
 		SessionID: sessionID, DeliveryKind: deliveryKind,
 	}, &result); err != nil {
-		c.log.Warn("session/subscribe refused; running on the state.updated floor", "error", err)
+		return fmt.Errorf("%s: %w", zcodeproto.MethodSessionSubscribe, err)
 	}
+	return nil
 }
 
 // readSnapshot refreshes the cached snapshot through session/read.
 func (c *conversation) readSnapshot(ctx context.Context, messageLimit int) (zcodeproto.Snapshot, error) {
 	var snapshot zcodeproto.Snapshot
 	limit := messageLimit
-	err := c.conn.request(ctx, zcodeproto.MethodSessionRead, zcodeproto.SessionReadParams{
+	err := c.sessionRequest(ctx, zcodeproto.MethodSessionRead, zcodeproto.SessionReadParams{
 		SessionID: c.ProviderConversationID(), MessageLimit: &limit,
 	}, &snapshot)
 	if err != nil {
@@ -502,7 +571,24 @@ func (c *conversation) readSnapshot(ctx context.Context, messageLimit int) (zcod
 	return snapshot, nil
 }
 
-// resumeEvicted reloads an evicted resident session in the same process.
+// sessionRequest issues one session RPC and, when the server answers that it
+// evicted the resident session (DESIGN 3.7), reloads the session once and
+// retries the same request.
+func (c *conversation) sessionRequest(ctx context.Context, method string, params, out any) error {
+	err := c.conn.request(ctx, method, params, out)
+	if err == nil || !isSessionEvicted(err) {
+		return err
+	}
+	if resumeErr := c.resumeEvicted(ctx); resumeErr != nil {
+		return err
+	}
+	return c.conn.request(ctx, method, params, out)
+}
+
+// resumeEvicted reloads an evicted resident session in the same process and
+// re-subscribes it: eviction dropped the resident record, and with it the
+// deliveryKind that session/subscribe had set (U1), so a bare session/resume
+// would leave the session on the state.updated floor for the rest of its life.
 func (c *conversation) resumeEvicted(ctx context.Context) error {
 	c.mu.Lock()
 	sessionID, workspace := c.sessionID, c.workspacePath
@@ -516,6 +602,11 @@ func (c *conversation) resumeEvicted(ctx context.Context) error {
 		return err
 	}
 	c.setSnapshot(snapshot)
+	if err := c.subscribe(ctx, sessionID); err != nil {
+		c.log.Warn("session/subscribe after eviction failed", "error", err)
+		return err
+	}
+	c.log.Warn("resident session was evicted; reloaded and re-subscribed", "session", sessionID)
 	return nil
 }
 
@@ -551,6 +642,7 @@ func (c *conversation) Close() error {
 		if c.proc.terminate == nil {
 			c.failPendingApprovals()
 		}
+		c.drainIfNoPump()
 		if c.proc.stop != nil {
 			c.closeErr = c.proc.stop()
 		}
@@ -563,6 +655,7 @@ func (c *conversation) Close() error {
 func (c *conversation) Terminate() error {
 	c.closeOnce.Do(func() {
 		c.failPendingApprovals()
+		c.drainIfNoPump()
 		if c.proc.terminate != nil {
 			c.closeErr = c.proc.terminate()
 		} else if c.proc.stop != nil {
@@ -570,6 +663,30 @@ func (c *conversation) Terminate() error {
 		}
 	})
 	return c.closeErr
+}
+
+// drainIfNoPump consumes the relay when no pump ever will: a failed create or
+// resume, or a live reconnect closed before activation. The server writes
+// startup notifications before the first request (PROVEN, fixture line 2), so
+// without a consumer the relay would park on its queue forever once the read
+// loop ends, one goroutine and up to 32 MiB per failed open.
+func (c *conversation) drainIfNoPump() {
+	c.mu.Lock()
+	started := c.pumpStarted
+	c.pumpStarted = true
+	c.mu.Unlock()
+	if started {
+		return
+	}
+	go func() {
+		for n := range c.conn.notifs() {
+			_ = n // discarded: nothing will ever consume this stream
+		}
+		c.eventsMu.Lock()
+		defer c.eventsMu.Unlock()
+		c.eventsClosed = true
+		close(c.events)
+	}()
 }
 
 // isSessionEvicted recognises the -32004 that means the server dropped a

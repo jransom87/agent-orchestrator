@@ -62,6 +62,13 @@ type serverRequest struct {
 // rather than as a decision.
 type serverRequestHandler func(context.Context, serverRequest) (any, error)
 
+// serverRequestArrivedHook is called synchronously on the read loop, in wire
+// order, before a server request's handler goroutine is spawned. It lets the
+// conversation register a host-replayed request ahead of the session/read
+// response the same loop delivers next, so reconciliation can never run ahead
+// of a replayed frame (DESIGN 3.5). It must not block.
+type serverRequestArrivedHook func(serverRequest)
+
 // ErrConnClosed reports use of a connection whose process has exited.
 var ErrConnClosed = errors.New("app-server connection closed")
 
@@ -89,7 +96,8 @@ type conn struct {
 	notificationInput chan notification
 	notifications     chan notification
 
-	onServerRequest serverRequestHandler
+	onServerRequest        serverRequestHandler
+	onServerRequestArrived serverRequestArrivedHook
 
 	// done closes when the read loop exits, so a caller waiting on a response
 	// learns the process died instead of blocking forever.
@@ -105,18 +113,19 @@ const (
 )
 
 func newConn(w io.WriteCloser, r io.Reader, log *slog.Logger, onReq serverRequestHandler) *conn {
-	return newConnAt(w, r, log, onReq, 0)
+	return newConnAt(w, r, log, onReq, nil, 0)
 }
 
-func newConnAt(w io.WriteCloser, r io.Reader, log *slog.Logger, onReq serverRequestHandler, nextID int64) *conn {
+func newConnAt(w io.WriteCloser, r io.Reader, log *slog.Logger, onReq serverRequestHandler, onArrived serverRequestArrivedHook, nextID int64) *conn {
 	c := &conn{
-		w:                 w,
-		log:               log,
-		pending:           make(map[int64]chan frame),
-		notificationInput: make(chan notification),
-		notifications:     make(chan notification),
-		onServerRequest:   onReq,
-		done:              make(chan struct{}),
+		w:                      w,
+		log:                    log,
+		pending:                make(map[int64]chan frame),
+		notificationInput:      make(chan notification),
+		notifications:          make(chan notification),
+		onServerRequest:        onReq,
+		onServerRequestArrived: onArrived,
+		done:                   make(chan struct{}),
 	}
 	c.nextID.Store(nextID)
 	go c.relayNotifications()
@@ -222,7 +231,11 @@ func (c *conn) readLoop(r io.Reader) {
 
 		switch {
 		case f.ID != nil && f.Method != "":
-			go c.answer(serverRequest{ID: *f.ID, Method: f.Method, Params: f.Params})
+			req := serverRequest{ID: *f.ID, Method: f.Method, Params: f.Params}
+			if c.onServerRequestArrived != nil {
+				c.onServerRequestArrived(req)
+			}
+			go c.answer(req)
 		case f.ID != nil:
 			c.deliver(f)
 		case f.Method != "":
@@ -388,15 +401,6 @@ func (c *conn) request(ctx context.Context, method string, params, out any) erro
 		}
 		return nil
 	}
-}
-
-// notify sends a client->server notification, which expects no reply.
-func (c *conn) notify(method string, params any) error {
-	payload := map[string]any{"method": method}
-	if params != nil {
-		payload["params"] = params
-	}
-	return c.write(payload)
 }
 
 // closeWrite closes stdin, which is how app-server is asked to shut down
