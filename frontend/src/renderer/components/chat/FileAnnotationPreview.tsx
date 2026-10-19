@@ -14,7 +14,7 @@ export function FileAnnotationPreview({reference}:{reference:ChatFileReference})
  if(context && queryClient) return <ResolvedPreview reference={reference} context={context} />;
  return <CapturedPreview reference={reference} />;
 }
-function CapturedPreview({reference,status}:{reference:ChatFileReference;status?:"chat.fileAnnotationChanged" | "chat.fileAnnotationUnavailable"}) {
+function CapturedPreview({reference,status}:{reference:ChatFileReference;status?:"chat.fileAnnotationChanged" | "chat.fileAnnotationUnavailable" | "chat.fileAnnotationInvalid" | "chat.fileAnnotationCheckFailed"}) {
  const {t}=useTranslation();
  return <CapturedFileAnnotation reference={reference}>
   {status ? <span className="block text-muted-foreground" role="status">{t(status)} {t("chat.fileAnnotationCapturedPreview")}</span>:null}
@@ -26,16 +26,17 @@ function ResolvedPreview({reference,context}:{reference:ChatFileReference;contex
  const query=useQuery({
   queryKey:context.hostId ? ["file-annotation-source",context.hostId,context.sessionId,reference.id] : ["file-annotation-source",context.sessionId,reference.id],
   queryFn:async({signal})=>{
-   if(reference.sessionId!==context.sessionId) throw new Error("Source belongs to another session");
+   if(reference.sessionId!==context.sessionId) throw new Error("CHAT_FILE_REFERENCE_INVALID");
    const {data,error}=await clientForSessionHost(context.hostId).POST("/api/v1/sessions/{sessionId}/conversation/file-references/resolve",{
     params:{path:{sessionId:context.sessionId}},body:reference,signal,
    });
-   if(error || !data) throw new Error("Source unavailable");
+   if(error || !data) throw new Error(error?.code ?? "FILE_REFERENCE_CHECK_FAILED");
    return data;
   },
   retry:false,staleTime:0,refetchOnWindowFocus:false,
  });
  useEffect(()=>subscribeWorkspaceFileChanges(context.sessionId,queryClient,context.hostId),[context.sessionId,context.hostId,queryClient]);
- const state=query.isError ? "unavailable" : query.data?.state;
- return <CapturedPreview reference={reference} status={state==="changed" ? "chat.fileAnnotationChanged" : state==="unavailable" ? "chat.fileAnnotationUnavailable" : undefined} />;
+ const state=query.isError ? undefined : query.data?.state;
+ const failureStatus=query.error?.message==="CHAT_FILE_REFERENCE_INVALID" ? "chat.fileAnnotationInvalid" : "chat.fileAnnotationCheckFailed";
+ return <CapturedPreview reference={reference} status={query.isError ? failureStatus : state==="changed" ? "chat.fileAnnotationChanged" : state==="unavailable" ? "chat.fileAnnotationUnavailable" : undefined} />;
 }

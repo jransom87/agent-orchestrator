@@ -112,3 +112,17 @@ func TestFileReferenceHonorsContextRowsOwnDiffSide(t *testing.T) {
 		t.Fatalf("new-side context was incorrectly verified against old contents: %+v", result)
 	}
 }
+
+func TestCapturedBlankRowsMatchCRLFSource(t *testing.T) {
+	ref := ports.ChatFileReference{Side: "file", Line: 1, EndLine: 5}
+	for i, text := range []string{"services:", "", "  web:", " \t", "    image: example"} {
+		n := i + 1
+		ref.Lines = append(ref.Lines, ports.ChatFileReferenceLine{Kind: "context", OldNo: &n, NewNo: &n, Text: text})
+	}
+	result := resolveCapturedFileRows(ref, func(WorkspaceFileBlobSide) (WorkspaceFileRevision, error) {
+		return WorkspaceFileRevision{Exists: true, Content: "services:\r\n\r\n  web:\r\n \t\r\n    image: example\r\n"}, nil
+	})
+	if result.State != "unchanged" {
+		t.Fatalf("blank CRLF rows were not unchanged: %+v", result)
+	}
+}

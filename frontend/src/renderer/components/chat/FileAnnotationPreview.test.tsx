@@ -26,3 +26,22 @@ describe("captured file source state",()=>{
   expect(ref.lines[0].text).toBe("captured();");
  });
 });
+
+it.each([
+ [{ error: {code: "CHAT_FILE_REFERENCE_INVALID"} }, /Selection could not be validated/],
+ [{ error: {code: "INTERNAL_ERROR"} }, /Source check failed/],
+])("does not report request errors as missing source (%j)", async (response, label) => {
+ request.mockResolvedValue(response);
+ setup();
+ fireEvent.click(screen.getByRole("button", {name:"1 annotation"}));
+ await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent(label));
+ expect(screen.getByRole("status")).not.toHaveTextContent("Source unavailable");
+ expect(screen.getByText("captured();")).toBeInTheDocument();
+ expect(ref.lines[0].text).toBe("captured();");
+});
+it("distinguishes a disconnected source check from an unavailable source", async () => {
+ request.mockRejectedValue(new TypeError("Failed to fetch"));setup();
+ fireEvent.click(screen.getByRole("button", {name:"1 annotation"}));
+ await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Source check failed"));
+ expect(screen.getByRole("status")).not.toHaveTextContent("Source unavailable");
+});
