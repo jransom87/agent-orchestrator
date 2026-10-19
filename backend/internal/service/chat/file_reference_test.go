@@ -108,3 +108,54 @@ func TestFileReferenceValidationAcceptsIndependentDiffSideCoordinates(t *testing
 		t.Fatal("accepted reversed range on the same side")
 	}
 }
+
+func TestMixedAnnotationDeliveryUsesAttachmentOrderWithoutMutatingStoredContent(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		fileOrder, chatOrder int64
+		chatFirst            bool
+	}{
+		{"chat then file", 20, 10, true},
+		{"file then chat", 10, 20, false},
+		{"equal order keeps content order", 10, 10, false},
+		{"legacy missing order keeps content order", 0, 0, false},
+		{"legacy precedes ordered annotation", 10, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := testFileReference()
+			ref.Order = tc.fileOrder
+			msg := ports.ChatUserMessage{Text: "compare the first annotation with the second", Content: []ports.ChatContent{
+				{Type: "text", Text: "ordinary content"},
+				{Type: "file_reference", FileReference: &ref},
+				{Type: "text", Internal: true, Text: "internal separator"},
+				{Type: "image", MIMEType: "image/png", Data: "image data"},
+				{Type: "excerpt", Excerpt: &ports.ChatExcerptContext{Reference: ports.ChatExcerptReference{Order: tc.chatOrder}, SelectedText: "selected chat marker"}},
+			}}
+			before, _ := json.Marshal(msg)
+			delivery := excerptDeliveryMessage(msg)
+			chatAt, fileAt := strings.Index(delivery.Text, "selected chat marker"), strings.Index(delivery.Text, "await retry();")
+			if chatAt < 0 || fileAt < 0 || (chatAt < fileAt) != tc.chatFirst {
+				t.Fatalf("wrong annotation order: %s", delivery.Text)
+			}
+			separatorAt := strings.Index(delivery.Text, "internal separator")
+			if tc.chatFirst && !(chatAt < separatorAt && separatorAt < fileAt) || !tc.chatFirst && !(fileAt < separatorAt && separatorAt < chatAt) {
+				t.Fatal("internal content moved out of its original slot")
+			}
+			if len(delivery.Content) != 2 || delivery.Content[0].Text != "ordinary content" || delivery.Content[1].Data != "image data" {
+				t.Fatalf("ordinary content changed: %+v", delivery.Content)
+			}
+			after, _ := json.Marshal(msg)
+			if string(before) != string(after) {
+				t.Fatal("mutated stored annotations")
+			}
+			// Queued/retried delivery reconstructs the same structured content.
+			var restored ports.ChatUserMessage
+			if err := json.Unmarshal(before, &restored); err != nil {
+				t.Fatal(err)
+			}
+			if replay := excerptDeliveryMessage(restored); replay.Text != delivery.Text || strings.Count(replay.Text, "await retry();") != 1 {
+				t.Fatal("restored delivery reordered or duplicated a selection")
+			}
+		})
+	}
+}

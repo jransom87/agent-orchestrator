@@ -3194,5 +3194,7 @@
 	"chat.draft.annotationLimit": "You can attach up to eight annotations. Remove one before adding another.",
 	"chat.draft.fileReferencesUnsupported": "This chat does not support file annotations. Reconnect to an updated daemon or remove the file annotations.",
 	"chat.draft.fileReferencesSideUnsupported": "File annotations cannot be sent to a side chat yet. Remove them or send this message in the main chat.",
-	"chat.draft.fileReferencesCompactUnsupported": "Remove file annotations before running /compact."
+	"chat.draft.fileReferencesCompactUnsupported": "Remove file annotations before running /compact.",
+	"chat.fileAnnotationShowMore": "展开",
+	"chat.fileAnnotationShowLess": "收起"
 }

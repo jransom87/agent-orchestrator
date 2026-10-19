@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1915,9 +1916,39 @@ func (c *Controller) dispatch(
 // The durable message still retains the structured blocks for retry and
 // transcript provenance.
 func excerptDeliveryMessage(msg ports.ChatUserMessage) ports.ChatUserMessage {
+	// Hydration appends chat excerpts after file blocks. Restore the attachment
+	// order without moving any non-annotation content or mutating durable data.
+	ordered := append([]ports.ChatContent(nil), msg.Content...)
+	var annotations []ports.ChatContent
+	annotationOrder := func(item ports.ChatContent) (int64, bool) {
+		if item.Type == "file_reference" && item.FileReference != nil {
+			return item.FileReference.Order, true
+		}
+		if item.Type == "excerpt" && item.Excerpt != nil {
+			return item.Excerpt.Reference.Order, true
+		}
+		return 0, false
+	}
+	for _, item := range ordered {
+		if _, ok := annotationOrder(item); ok {
+			annotations = append(annotations, item)
+		}
+	}
+	sort.SliceStable(annotations, func(i, j int) bool {
+		a, _ := annotationOrder(annotations[i])
+		b, _ := annotationOrder(annotations[j])
+		return a < b
+	})
+	next := 0
+	for i, item := range ordered {
+		if _, ok := annotationOrder(item); ok {
+			ordered[i] = annotations[next]
+			next++
+		}
+	}
 	content := make([]ports.ChatContent, 0, len(msg.Content))
 	var fallback strings.Builder
-	for _, item := range msg.Content {
+	for _, item := range ordered {
 		if item.Internal && item.Type == "text" {
 			fallback.WriteString("\n\n" + item.Text)
 			continue

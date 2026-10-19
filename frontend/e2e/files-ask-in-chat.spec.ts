@@ -333,3 +333,26 @@ test("sent file annotations retain their captured preview after restoring conver
  expect(sentToChat[0].text).toBe("explain captured code");
  expect(sentToChat[0].fileReferences[0].lines.some(row=>row.text==="const value4 = 4;")).toBe(true);
 });
+
+test("shortens only the displayed file preview and sends every captured row", async ({ page }) => {
+	const { inspector, composer, sentToChat } = await openChatSession(page);
+	await inspector.getByRole("button", { name: "Open full file" }).click();
+	await selectText(page, row(page, CENTER, 3), row(page, CENTER, 11));
+	await askButton(page).getByRole("button", { name: "Add to chat" }).click();
+	await page.getByRole("button", { name: "1 annotation" }).click();
+	const preview = page.getByRole("dialog").locator("pre");
+	await expect(preview).toHaveClass(/line-clamp-6/);
+	await expect(preview).not.toContainText("const value10 = 10;");
+	await page.getByRole("button", { name: "Show more", exact: true }).click();
+	await expect(preview).toContainText("const value10 = 10;");
+	await page.getByRole("button", { name: "Show less", exact: true }).click();
+	await expect(preview).not.toContainText("const value10 = 10;");
+	await page.keyboard.press("Escape");
+	await composer.click();
+	await page.keyboard.type("explain the complete selection");
+	await page.keyboard.press("Enter");
+	await expect.poll(() => sentToChat.length).toBe(1);
+	expect(sentToChat[0].fileReferences[0].lines).toHaveLength(9);
+	expect(sentToChat[0].fileReferences[0].lines.at(-1)?.text).toBe("const value10 = 10;");
+	expect(sentToChat[0].fileReferences[0].truncated).toBe(false);
+});
