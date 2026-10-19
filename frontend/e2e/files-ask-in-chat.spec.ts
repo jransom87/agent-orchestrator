@@ -332,7 +332,16 @@ test("file annotations show captured code and open a verified selected range", a
  await page.getByRole("button",{name:"1 annotation"}).click();
  await expect(page.getByRole("button",{name:/^Open selected lines:/})).toBeVisible();
  await expect(page.locator("pre").filter({hasText:"const value4 = 4;"}).last()).toBeVisible();
- await page.getByRole("button",{name:/^Open selected lines:/}).click();
+ const preview=page.getByRole("dialog").locator("pre");
+ await preview.evaluate(element=>{
+  const range=document.createRange();range.selectNodeContents(element);
+  window.getSelection()!.removeAllRanges();window.getSelection()!.addRange(range);
+ });
+ // Dispatch without pointer-down so the selection remains intact.
+ await preview.dispatchEvent("click");
+ await expect(page.getByRole("dialog")).toBeVisible();
+ await preview.evaluate(()=>window.getSelection()!.removeAllRanges());
+ await preview.click();
  await expect(page.locator(CENTER)).toBeVisible();
  await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
  await expect(row(page,CENTER,4)).toHaveAttribute("data-selected-line");
@@ -342,7 +351,8 @@ test("file annotations show captured code and open a verified selected range", a
  await expect(row(page,CENTER,3)).not.toHaveAttribute("data-selected-line");
  await page.getByRole("tab",{name:/Add to chat/}).click();
  await page.getByRole("button",{name:"1 annotation"}).click();
- await page.getByRole("button",{name:/^Open selected lines:/}).click();
+ await page.getByRole("button",{name:/^Open selected lines:/}).focus();
+ await page.keyboard.press("Enter");
  await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
  await row(page,CENTER,8).click();
  await expect(row(page,CENTER,3)).not.toHaveAttribute("data-selected-line");

@@ -73,7 +73,7 @@ it("opens from the whole annotation and supports keyboard activation", async () 
 	const open = vi.fn();
 	setup(open);
 	await user.click(screen.getByRole("button", { name: "1 annotation" }));
-	const header = await screen.findByRole("button", { name: /^Open selected lines: src\/a.ts/ });
+	await screen.findByRole("button", { name: /^Open selected lines: src\/a.ts/ });
 	expect(screen.queryByText("Open selected lines")).not.toBeInTheDocument();
 	await user.click(screen.getByText("captured();"));
 	await waitFor(() => expect(open).toHaveBeenCalledOnce());
