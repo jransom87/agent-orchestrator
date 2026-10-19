@@ -242,6 +242,15 @@ func TestAugmentRuntimeLaunchEnv(t *testing.T) {
 			t.Fatalf("env = %v, want no injection", env)
 		}
 	})
+
+	t.Run("daemon-environment override beats the data-dir default", func(t *testing.T) {
+		t.Setenv(zcodeDataBaseDirEnv, "/opt/operator-store")
+		env := map[string]string{}
+		plugin.AugmentRuntimeLaunchEnv(env, "/tmp/ao-data", "sess", "launch")
+		if env[zcodeDataBaseDirEnv] != "/opt/operator-store" {
+			t.Fatalf("env = %v, want daemon-env override", env)
+		}
+	})
 }
 
 func TestZcodeTokenExpiry(t *testing.T) {

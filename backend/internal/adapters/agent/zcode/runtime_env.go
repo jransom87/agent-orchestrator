@@ -1,6 +1,9 @@
 package zcode
 
 import (
+	"os"
+	"strings"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -8,10 +11,11 @@ import (
 var _ ports.AgentRuntimeLaunchEnv = (*Plugin)(nil)
 
 // AugmentRuntimeLaunchEnv pins the credential store the launched zcode process
-// uses to the adapter-owned location under AO's data dir, so the auth probe
-// (AuthStatus), the login plan, and every session launch resolve the same
-// store. An explicitly pre-set ZCODE_DATA_BASE_DIR wins — that is the escape
-// hatch for operator-managed stores, honored identically by the probe.
+// uses, so the auth probe (AuthStatus), the login plan, and every session
+// launch resolve the same store. Resolution mirrors the probe: a value already
+// in the session env map wins (project-level override), then an operator-set
+// ZCODE_DATA_BASE_DIR in the daemon's own environment, then the adapter-owned
+// location under the manager's data dir.
 func (p *Plugin) AugmentRuntimeLaunchEnv(env map[string]string, dataDir string, _ domain.SessionID, _ string) {
 	if env == nil {
 		return
@@ -19,7 +23,11 @@ func (p *Plugin) AugmentRuntimeLaunchEnv(env map[string]string, dataDir string, 
 	if _, ok := env[zcodeDataBaseDirEnv]; ok {
 		return
 	}
-	if base := zcodeHarnessStoreBase(dataDir); base != "" {
+	base := strings.TrimSpace(os.Getenv(zcodeDataBaseDirEnv))
+	if base == "" {
+		base = zcodeHarnessStoreBase(dataDir)
+	}
+	if base != "" {
 		env[zcodeDataBaseDirEnv] = base
 	}
 }
