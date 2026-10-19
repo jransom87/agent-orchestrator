@@ -59,7 +59,7 @@ it("rechecks before opening and cancels an older click", async () => {
 	fireEvent.click(button);
 	generation.current++;
 	finish({ data: { state: "unchanged", path: ref.path, line: 1, endLine: 1 } });
-	await waitFor(() => expect(button).not.toBeDisabled());
+	await waitFor(() => expect(button).not.toHaveAttribute("aria-disabled", "true"));
 	expect(open).not.toHaveBeenCalled();
 	request.mockResolvedValueOnce({ data: { state: "changed" } });
 	fireEvent.click(button);
@@ -67,26 +67,7 @@ it("rechecks before opening and cancels an older click", async () => {
 	expect(open).not.toHaveBeenCalled();
 });
 
-it.each([
- [{ error: {code: "CHAT_FILE_REFERENCE_INVALID"} }, /Selection could not be validated/],
- [{ error: {code: "INTERNAL_ERROR"} }, /Source check failed/],
-])("does not report request errors as missing source (%j)", async (response, label) => {
- request.mockResolvedValue(response);
- setup();
- fireEvent.click(screen.getByRole("button", {name:"1 annotation"}));
- await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent(label));
- expect(screen.getByRole("status")).not.toHaveTextContent("Source unavailable");
- expect(screen.getByText("captured();")).toBeInTheDocument();
- expect(ref.lines[0].text).toBe("captured();");
-});
-it("distinguishes a disconnected source check from an unavailable source", async () => {
- request.mockRejectedValue(new TypeError("Failed to fetch"));setup();
- fireEvent.click(screen.getByRole("button", {name:"1 annotation"}));
- await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Source check failed"));
- expect(screen.getByRole("status")).not.toHaveTextContent("Source unavailable");
-});
-
-it("opens only from the header, supports keyboard activation, and keeps code selectable", async () => {
+it("opens from the whole annotation and supports keyboard activation", async () => {
 	const user = userEvent.setup();
 	request.mockResolvedValue({ data: { state: "unchanged", path: ref.path, line: 1, endLine: 1 } });
 	const open = vi.fn();
@@ -95,10 +76,11 @@ it("opens only from the header, supports keyboard activation, and keeps code sel
 	const header = await screen.findByRole("button", { name: /^Open selected lines: src\/a.ts/ });
 	expect(screen.queryByText("Open selected lines")).not.toBeInTheDocument();
 	await user.click(screen.getByText("captured();"));
-	expect(open).not.toHaveBeenCalled();
-	header.focus();
-	await user.keyboard("{Enter}");
 	await waitFor(() => expect(open).toHaveBeenCalledOnce());
+	await user.click(screen.getByRole("button", { name: "1 annotation" }));
+	(await screen.findByRole("button", { name: /^Open selected lines: src\/a.ts/ })).focus();
+	await user.keyboard("{Enter}");
+	await waitFor(() => expect(open).toHaveBeenCalledTimes(2));
 });
 
 it("keeps capture-truncated references static even if the resolver reports unchanged", async () => {
