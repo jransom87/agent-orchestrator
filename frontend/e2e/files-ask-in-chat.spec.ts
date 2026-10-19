@@ -340,11 +340,13 @@ test("file annotations show captured code and open a verified selected range", a
  await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
  await page.keyboard.press("Escape");
  await expect(row(page,CENTER,3)).not.toHaveAttribute("data-selected-line");
+ await page.getByRole("tab",{name:/Add to chat/}).click();
  await page.getByRole("button",{name:"1 annotation"}).click();
  await page.getByRole("button",{name:/^Open selected lines:/}).click();
  await expect(row(page,CENTER,3)).toHaveAttribute("data-selected-line");
  await row(page,CENTER,8).click();
  await expect(row(page,CENTER,3)).not.toHaveAttribute("data-selected-line");
+ await page.getByRole("tab",{name:/Add to chat/}).click();
  await expect(page.getByRole("button",{name:"1 annotation"})).toBeVisible();
 });
 
