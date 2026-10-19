@@ -44,8 +44,9 @@ var driverMethods = []string{
 
 	// Notifications the normalizer drops by name.
 	zcodeproto.MethodStartupStorageState,
-	zcodeproto.MethodProcessResourceSample,
 	zcodeproto.MethodProcessMcpTelemetry,
+	zcodeproto.MethodV4TelemetryEvent,
+	zcodeproto.MethodProcessResourceSample,
 	zcodeproto.MethodProcessMcpResourceSamples,
 	zcodeproto.MethodProcessToolExecResource,
 	zcodeproto.MethodProcessNetworkRequests,
@@ -82,29 +83,37 @@ func TestEveryMethodTheDriverUsesIsDeclared(t *testing.T) {
 
 // TestProvenMethodsHaveReplayFixtures demands a capture for every method the
 // catalog calls PROVEN, so a row cannot be promoted without the evidence
-// landing in testdata.
+// landing in testdata: the row's Evidence fixture must exist and contain the
+// method, and a STATIC row must claim no evidence. A fixture may only hold
+// frames extracted from a capture (every line names its source).
 func TestProvenMethodsHaveReplayFixtures(t *testing.T) {
-	entries, err := os.ReadDir("testdata")
-	if err != nil {
-		t.Fatalf("read testdata: %v", err)
-	}
-	seen := map[string]bool{}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".ndjson") {
-			continue
-		}
-		for _, line := range loadReplay(t, entry.Name()) {
+	seen := map[string]map[string]bool{}
+	for _, name := range fixtureNames(t) {
+		seen[name] = map[string]bool{}
+		for _, line := range loadReplay(t, name) {
 			if line.Frame.Method != "" {
-				seen[line.Frame.Method] = true
+				seen[name][line.Frame.Method] = true
 			}
 		}
 	}
 	for _, info := range zcodeproto.Methods {
 		if info.Provenance != zcodeproto.ProvenanceProven {
+			if info.Evidence != "" {
+				t.Errorf("%s is STATIC but names evidence %s", info.Name, info.Evidence)
+			}
 			continue
 		}
-		if !seen[info.Name] {
-			t.Errorf("%s is PROVEN but appears in no testdata/*.ndjson capture", info.Name)
+		if info.Evidence == "" {
+			t.Errorf("%s is PROVEN but names no evidence fixture", info.Name)
+			continue
+		}
+		methods, ok := seen[info.Evidence]
+		if !ok {
+			t.Errorf("%s names evidence %s, which is not in testdata/", info.Name, info.Evidence)
+			continue
+		}
+		if !methods[info.Name] {
+			t.Errorf("%s is PROVEN but does not appear in its evidence fixture %s", info.Name, info.Evidence)
 		}
 	}
 }

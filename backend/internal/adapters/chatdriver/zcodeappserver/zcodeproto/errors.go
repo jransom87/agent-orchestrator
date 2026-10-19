@@ -21,17 +21,22 @@ const (
 	// session/create (`Xai`). AO uses it for every request it does not model.
 	CodeMethodNotFound = -32601
 	CodeInvalidParams  = -32602
-	CodeInternal       = -32603
+	// CodeInternal is what session/setModel answers for a selection the
+	// registry refuses: "Provider Registry 中不存在 Model" for an unknown provider
+	// and ModelProtocolError "Reasoning level is required for <provider>/<model>"
+	// when options.reasoningLevel is missing (PROVEN, p7-models.ndjson).
+	CodeInternal = -32603
 	// CodeSessionUnavailable carries two distinct messages: "Session not found:
-	// <id>" (`DFn`, unknown id on session/resume) and "Session is not active:
-	// <id>" (`Np`, resident session evicted). Callers branch on the message
-	// prefix, never on the code alone (U7).
+	// <id>" (`DFn`, unknown id on session/resume; PROVEN, p8-resume.ndjson) and
+	// "Session is not active: <id>" (`Np`, resident session evicted; STATIC).
+	// Callers branch on the message prefix, never on the code alone (U7).
 	CodeSessionUnavailable = -32004
 	// CodeRevisionMismatch is raised when an expectedRevision does not match;
 	// the driver never sends one.
 	CodeRevisionMismatch = -32009
 	// CodePromptConflict is "A prompt is already running for this session"
-	// (`yci`), thrown before prompt_started is emitted.
+	// (`yci`), thrown before prompt_started is emitted. PROVEN
+	// (p1-create-send-complete.ndjson: a second session/send during a turn).
 	CodePromptConflict         = -32010
 	CodeNoClientAttached       = -32020
 	CodeClientCancelled        = -32021
@@ -44,7 +49,7 @@ const (
 )
 
 // SessionNotFoundPrefix is the message prefix of a CodeSessionUnavailable error
-// for an id the server has no record of (`DFn`). STATIC, U7.
+// for an id the server has no record of (`DFn`). PROVEN (p8-resume.ndjson).
 const SessionNotFoundPrefix = "Session not found:"
 
 // SessionNotActivePrefix is the message prefix of a CodeSessionUnavailable error
