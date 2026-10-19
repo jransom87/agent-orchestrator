@@ -434,3 +434,21 @@ test("mixed diff annotations preserve the new side of trailing context",async({p
  await expect(row(page,CENTER,5,"change-deletion")).toHaveAttribute("data-selected-line");
  await expect(row(page,CENTER,8)).toHaveAttribute("data-selected-line");
 });
+
+test("opens and highlights a CRLF selection containing blank rows", async ({page}) => {
+ const lines=after.split("\n");lines.splice(12,5,"services:","","  web:"," \t","    image: example");
+ const {inspector}=await openChatSession(page,lines.join("\r\n"));
+ let captured:ChatFileReference|undefined;
+ await page.route("**/conversation/file-references/resolve",route=>{
+  captured=route.request().postDataJSON() as ChatFileReference;
+  if(captured.lines.some(row=>/[\r\n\0]/.test(row.text)))return route.fulfill({status:400,json:{code:"CHAT_FILE_REFERENCE_INVALID"}});
+  return route.fulfill({json:{state:"unchanged",path:captured.path,line:captured.line,endLine:captured.endLine,side:captured.side}});
+ });
+ await inspector.getByRole("button",{name:"Open full file"}).click();
+ await selectText(page,row(page,CENTER,13),row(page,CENTER,17));
+ await askButton(page).getByRole("button",{name:"Add to chat"}).click();
+ await page.getByRole("button",{name:"1 annotation"}).click();
+ await page.getByRole("button",{name:/^Open selected lines:/}).click();
+ for(const n of [13,14,15,16,17])await expect(row(page,CENTER,n)).toHaveAttribute("data-selected-line");
+ expect(captured?.lines.map(row=>row.text)).toEqual(["services:","","  web:"," \t","    image: example"]);
+});

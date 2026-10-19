@@ -137,3 +137,17 @@ it("distinguishes old and new shadow-root rows when dismissing a split diff", ()
 	expect(view.result.current.selectedLines).toBeNull();
 	view.cleanup();
 });
+
+it.each(["\n","\r\n"])("verifies a range containing rendered blank/whitespace rows (%j)", ending => {
+ const selection: FileAnnotationRange={...range,line:1,endLine:3,lines:[{kind:"context",oldNo:1,newNo:1,text:"services:"},{kind:"context",oldNo:2,newNo:2,text:""},{kind:"context",oldNo:3,newNo:3,text:" \t"}]};
+ const view=setup('<div data-line="1" data-line-type="context">services:</div><div data-line="2" data-line-type="context"></div><div data-line="3" data-line-type="context"> \t</div>',selection);
+ const rows=document.querySelector("diffs-container")!.shadowRoot!.querySelectorAll<HTMLElement>("[data-line]");
+ rows[1].textContent=ending;rows[2].textContent=" \t"+ending;
+ act(()=>view.result.current.reveal());
+ expect(view.result.current.changed).toBe(false);
+ expect(view.result.current.selectedLines).toMatchObject({start:1,end:3});
+ rows[2].textContent="  ";act(()=>view.result.current.reveal());
+ expect(view.result.current.changed).toBe(true);
+ expect(view.result.current.selectedLines).toBeNull();
+ view.cleanup();
+});

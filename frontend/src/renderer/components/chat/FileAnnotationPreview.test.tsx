@@ -14,7 +14,7 @@ const ref = captureFileReference(
 	{ path: "src/a.ts", side: "file", line: 1, endLine: 1, lines: [{ kind: "context", oldNo: 1, newNo: 1, text: "captured();" }] },
 	"session",
 );
-beforeEach(() => request.mockReset());
+beforeEach(() => { request.mockReset(); });
 function setup(onOpen?: () => void, generation = { current: 0 }, reference = ref) {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	render(
@@ -90,4 +90,36 @@ it("keeps capture-truncated references static even if the resolver reports uncha
 	await waitFor(() => expect(request).toHaveBeenCalledOnce());
 	expect(screen.queryByRole("button", { name: /^Open selected lines:/ })).not.toBeInTheDocument();
 	expect(screen.getByText("Captured selection truncated")).toBeInTheDocument();
+});
+
+it.each([
+ [{ error: {code: "CHAT_FILE_REFERENCE_INVALID"} }, /Selection could not be validated/],
+ [{ error: {code: "INTERNAL_ERROR"} }, /Source check failed/],
+])("does not report request errors as missing source (%j)", async (response, label) => {
+ request.mockResolvedValue(response);
+ setup();
+ fireEvent.click(screen.getByRole("button", {name:"1 annotation"}));
+ await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent(label));
+ expect(screen.getByRole("status")).not.toHaveTextContent("Source unavailable");
+ expect(screen.getByText("captured();")).toBeInTheDocument();
+ expect(ref.lines[0].text).toBe("captured();");
+});
+it("distinguishes a disconnected source check from an unavailable source", async () => {
+ request.mockRejectedValue(new TypeError("Failed to fetch"));setup();
+ fireEvent.click(screen.getByRole("button", {name:"1 annotation"}));
+ await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Source check failed"));
+ expect(screen.getByRole("status")).not.toHaveTextContent("Source unavailable");
+});
+
+it("blocks navigation after revalidation rejects the annotation", async () => {
+ request.mockResolvedValue({data:{state:"unchanged",path:ref.path,line:1,endLine:1}});
+ const open=vi.fn();setup(open);
+ fireEvent.click(screen.getByRole("button",{name:"1 annotation"}));
+ const card=await screen.findByRole("button",{name:/^Open selected lines:/});
+ request.mockResolvedValueOnce({error:{code:"CHAT_FILE_REFERENCE_INVALID"}});
+ fireEvent.click(card);
+ await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Selection could not be validated"));
+ expect(open).not.toHaveBeenCalled();
+ expect(screen.queryByRole("button",{name:/^Open selected lines:/})).not.toBeInTheDocument();
+ expect(screen.getByText("captured();")).toBeInTheDocument();
 });

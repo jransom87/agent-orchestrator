@@ -1,3 +1,4 @@
+import { normalizeCodeRowText } from "../../../shared/file-annotations";
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { SelectedLineRange } from "@pierre/diffs";
 import type { FileAnnotationRange } from "../../../shared/chat-file-reference";
@@ -33,7 +34,7 @@ export function useFileAnnotationReveal(container: RefObject<HTMLElement | null>
 			const number = old ? row.oldNo : row.newNo;
 			if (number == null) continue;
 			const element = (old ? oldRows : newRows).get(number);
-			if (!element || element.textContent !== row.text) {
+			if (!element || normalizeCodeRowText(element.textContent ?? "") !== row.text) {
 				if (element || alreadyRevealed) {
 					setChanged(true);
 					setSelectedLines(null);
