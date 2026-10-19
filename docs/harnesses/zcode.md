@@ -48,13 +48,19 @@ that need side-effecting shell commands must run bypass-permissions (yolo).
 
 ## Known limits
 
-- `ao send` into a zcode pane is typed at the one-shot process (undefined
-  mid-run) or at the keep-alive shell prompt after exit, where it would be
-  executed as a shell command. Message zcode workers through the pane until a
-  chat driver lands; a refusal gate for one-shot adapters belongs in the
-  session manager.
+- `ao send` to a zcode TUI session is refused by the session manager with
+  409 `HARNESS_ONE_SHOT`; the message names the harness and points at
+  `ao spawn --agent zcode`. The launch puts nothing interactive in the pane:
+  while `zcode -p` runs the text would go to its stdin, and after it exits
+  (until the reaper's next 5 s tick flips the session to exited) the
+  keep-alive shell would execute it. The refusal is per harness, so a
+  restored session (`ao restore` / `ao resume-agent`, which relaunches as the
+  interactive `zcode -c` TUI) is refused too; type into its pane directly. A
+  terminated session keeps the usual 409 `SESSION_TERMINATED`. Chat-driver
+  sessions, when they land, are relayed into their conversation and never
+  gated.
 - No workspace hooks in v1 (zcode hooks live in per-plugin `hooks.json`
-  manifests), so the dashboard reads active work as idle and the reaper sees
-  only the keep-alive shell.
+  manifests), so the dashboard reads active work as idle; the reaper flips
+  the session to exited within one tick of `zcode -p` returning.
 - Restore is cwd-scoped `zcode -c` (latest session for the worktree); AO
   stores no native session id for zcode today.
