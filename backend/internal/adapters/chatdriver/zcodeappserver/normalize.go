@@ -427,7 +427,7 @@ func normalizeToolUpdated(payload zcodeproto.ToolUpdatedPayload, turn string, t 
 		// STATIC: never observed.
 		extra := map[string]any{}
 		if len(payload.Error) > 0 {
-			extra["error"] = json.RawMessage(payload.Error)
+			extra["error"] = payload.Error
 		}
 		return []ports.ChatEvent{{
 			Kind:           ports.ChatEventActivityCompleted,
@@ -534,7 +534,7 @@ func toolDetail(toolName string, input json.RawMessage, extra map[string]any) []
 		detail["command"] = command
 	}
 	if len(input) > 0 && json.Valid(input) {
-		detail["arguments"] = json.RawMessage(input)
+		detail["arguments"] = input
 	}
 	for key, value := range extra {
 		detail[key] = value

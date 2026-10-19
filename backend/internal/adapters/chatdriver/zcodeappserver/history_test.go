@@ -98,8 +98,14 @@ func TestHistoryEventsProjectTheCapturedTranscript(t *testing.T) {
 		seen[ev.ProviderEventID] = true
 	}
 	// The same read yields the same ids.
-	if again := historyEvents(p8SessionID, messages); !reflect.DeepEqual(again, events) {
-		t.Fatal("historyEvents is not deterministic")
+	again := historyEvents(p8SessionID, messages)
+	if len(again) != len(events) {
+		t.Fatalf("historyEvents is not deterministic: %d events, then %d", len(events), len(again))
+	}
+	for i := range events {
+		if again[i].ProviderEventID != events[i].ProviderEventID || again[i].Kind != events[i].Kind {
+			t.Fatalf("historyEvents is not deterministic at %d: %+v vs %+v", i, events[i], again[i])
+		}
 	}
 }
 

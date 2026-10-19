@@ -79,16 +79,15 @@ type parkedRequest struct {
 
 // resolve settles every waiter with one answer. Safe to call once; later calls
 // are no-ops so a timeout racing a decision cannot double-close.
-func (p *parkedRequest) resolve(reply any, err error) bool {
+func (p *parkedRequest) resolve(reply any, err error) {
 	select {
 	case <-p.done:
-		return false
+		return
 	default:
 	}
 	p.reply = reply
 	p.replyErr = err
 	close(p.done)
-	return true
 }
 
 func (p *parkedRequest) offeredIDs() []string {
@@ -225,7 +224,7 @@ func (c *conversation) parkPermission(ctx context.Context, req serverRequest) (a
 	}
 	detail, _ := json.Marshal(map[string]any{
 		"toolName": params.ToolName, "riskLevel": params.RiskLevel,
-		"input": json.RawMessage(validOr(params.Input, []byte("null"))), "toolCallId": params.ToolCallID,
+		"input": validOr(params.Input, []byte("null")), "toolCallId": params.ToolCallID,
 	})
 	ev := ports.ChatEvent{
 		Kind:           ports.ChatEventApprovalRequested,
@@ -410,7 +409,7 @@ func (c *conversation) ResolveRequest(ctx context.Context, requestID string, dec
 		c.mu.Unlock()
 		return err
 	}
-	c.settleLocked(parked, json.RawMessage(raw))
+	c.settleLocked(parked, raw)
 	c.mu.Unlock()
 	return nil
 }
@@ -632,7 +631,7 @@ func approvalKind(toolName string) domain.ActivityKind {
 	}
 }
 
-func validOr(raw json.RawMessage, fallback json.RawMessage) json.RawMessage {
+func validOr(raw, fallback json.RawMessage) json.RawMessage {
 	if len(raw) > 0 && json.Valid(raw) {
 		return raw
 	}

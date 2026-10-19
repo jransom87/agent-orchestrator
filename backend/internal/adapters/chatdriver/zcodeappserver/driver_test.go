@@ -587,7 +587,7 @@ func (s *scriptedServer) replay(lines []replayLine) {
 		}
 		start := i + 1
 		end := start
-		for end < len(lines) && !(lines[end].Dir == "out" && isRequest(lines[end].Frame)) {
+		for end < len(lines) && (lines[end].Dir != "out" || !isRequest(lines[end].Frame)) {
 			end++
 		}
 		method := lines[i].Frame.Method

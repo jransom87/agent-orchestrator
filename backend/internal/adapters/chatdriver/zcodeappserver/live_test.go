@@ -106,7 +106,7 @@ func TestLiveZcodeAppServer(t *testing.T) {
 	}
 	t.Logf("models: %d, default %q efforts %v", len(models), models[0].ID, models[0].Efforts)
 
-	answer := runLiveTurn(t, ctx, conv,
+	answer := runLiveTurn(ctx, t, conv,
 		"Remember this codeword for my next message: "+codeword+". Reply with exactly the word: acknowledged", "live-1")
 	if !strings.Contains(strings.ToLower(answer), "acknowledged") {
 		t.Errorf("first answer = %q, want acknowledged", answer)
@@ -147,7 +147,7 @@ func TestLiveZcodeAppServer(t *testing.T) {
 		t.Errorf("history lacks the first exchange: %+v", history)
 	}
 
-	answer = runLiveTurn(t, ctx, resumed,
+	answer = runLiveTurn(ctx, t, resumed,
 		"What codeword did I ask you to remember in my preceding message? Reply with only that codeword.", "live-2")
 	if !strings.Contains(strings.ToLower(answer), codeword) {
 		t.Fatalf("resumed session lost earlier context: answer = %q, want %q", answer, codeword)
@@ -155,7 +155,7 @@ func TestLiveZcodeAppServer(t *testing.T) {
 }
 
 // runLiveTurn sends one message and returns the settled reply text.
-func runLiveTurn(t *testing.T, ctx context.Context, conv ports.ChatConversation, text, clientID string) string {
+func runLiveTurn(ctx context.Context, t *testing.T, conv ports.ChatConversation, text, clientID string) string {
 	t.Helper()
 	ref, err := conv.SendTurn(ctx, ports.ChatUserMessage{Text: text, ClientMessageID: clientID, Origin: domain.MessageOriginHuman})
 	if err != nil {
