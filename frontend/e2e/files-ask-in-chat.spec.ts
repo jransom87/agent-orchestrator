@@ -15,7 +15,10 @@ const test = process.env.AO_E2E_ELECTRON
 				executablePath: require("electron") as string,
 				args: [path.join(__dirname, "support/electron-shell.cjs")],
 			});
-			await use(await app.firstWindow());
+			const page = await app.firstWindow();
+			// Native text selection and animation frames require an active window.
+			await page.bringToFront();
+			await use(page);
 			await app.close();
 		},
 	})
