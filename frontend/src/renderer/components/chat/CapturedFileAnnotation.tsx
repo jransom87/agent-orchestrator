@@ -37,7 +37,7 @@ export function CapturedFileAnnotation({ reference, children, onOpen, opening = 
 		tabIndex={onOpen ? 0 : undefined}
 		aria-label={onOpen ? `${t("chat.fileAnnotationOpen")}: ${reference.path} · ${location}` : undefined}
 		aria-disabled={onOpen && opening ? true : undefined}
-		className={onOpen ? "cursor-pointer rounded-sm text-left transition-colors hover:bg-interactive-active focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:opacity-50" : undefined}
+		className={onOpen ? "cursor-pointer rounded bg-transparent text-left text-popover-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:opacity-50" : undefined}
 		onPointerDownCapture={event => {
 			pointerStart.current = { x: event.clientX, y: event.clientY };
 			dragged.current = false;
