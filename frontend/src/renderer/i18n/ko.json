@@ -3214,5 +3214,6 @@
 	"chat.draft.fileReferencesSideUnsupported": "File annotations cannot be sent to a side chat yet. Remove them or send this message in the main chat.",
 	"chat.draft.fileReferencesCompactUnsupported": "Remove file annotations before running /compact.",
 	"chat.fileAnnotationShowMore": "더 보기",
-	"chat.fileAnnotationShowLess": "접기"
+	"chat.fileAnnotationShowLess": "접기",
+	"files.addToChatRejected": "선택 항목을 추가하지 못했습니다. 전송이 끝날 때까지 기다리거나 초안을 확인한 후 다시 시도하세요."
 }

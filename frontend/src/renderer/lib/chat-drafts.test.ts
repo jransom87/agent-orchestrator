@@ -50,6 +50,20 @@ class MemoryStorage implements DraftStorage {
 	}
 }
 
+it("refuses file reference writes during reserved preparation and accepts them after release", () => {
+	const storage = new MemoryStorage();
+	const scope = "reserved-file-intake";
+	writeChatComposerText(scope, "question", storage);
+	const snapshot = readChatSessionDraft(scope, storage).composer;
+	const token = beginChatComposerMutation(scope)!;
+	const ref = captureFileReference({ path: "a.ts", side: "file", line: 1, endLine: 1, lines: [{ kind: "context", oldNo: 1, newNo: 1, text: "captured();" }] }, scope);
+	expect(writeChatFileReferences(scope, [ref], storage).ok).toBe(false);
+	expect(readChatSessionDraft(scope, storage).composer).toEqual(snapshot);
+	cancelChatComposerMutation(scope, token);
+	expect(writeChatFileReferences(scope, [ref], storage).ok).toBe(true);
+	expect(readChatSessionDraft(scope, storage).composer.fileReferences).toEqual([ref]);
+});
+
 describe("optimistic composer drafts", () => {
 	const sent = { id: "sent", path: ".ao/attachments/sent.png", name: "sent.png", mimeType: "image/png", bytes: 4 };
 	const next = { ...sent, id: "next", path: ".ao/attachments/next.png" };

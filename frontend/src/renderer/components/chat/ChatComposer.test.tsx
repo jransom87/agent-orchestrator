@@ -96,6 +96,38 @@ const textFile = (name = "notes.txt") => new File(["hello"], name, { type: "text
 /* ---- the keyboard contract the composer already had ---------------------- */
 
 describe("send keys", () => {
+	it("enables the Send button for a file-only draft and sends the capture once", async () => {
+		const sessionId = "file-only-send-button";
+		const { onSend } = renderComposer({ draftSessionId: sessionId, fileReferencesEnabled: true });
+		const ref = captureFileReference({ path: "src/a.ts", side: "file", line: 1, endLine: 1, lines: [{ kind: "context", oldNo: 1, newNo: 1, text: "captured();" }] }, sessionId);
+		act(() => { expect(sendReferenceToChat(sessionId, ref)).toBe(true); });
+		const send = screen.getByRole("button", { name: "Send message" });
+		await waitFor(() => expect(send).toBeEnabled());
+		await userEvent.click(send);
+		await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+		expect(onSend.mock.calls[0][5]).toEqual([expect.objectContaining({ id: ref.id })]);
+		await waitFor(() => expect(readChatSessionDraft(sessionId).composer.fileReferences ?? []).toEqual([]));
+	});
+
+	it("refuses a new selection during slow staging, then accepts it for the next draft", async () => {
+		const sessionId = "selection-during-staging";
+		const staging = deferred<string[]>();
+		const stage = vi.fn(() => staging.promise);
+		const { onSend, field } = renderComposer({ draftSessionId: sessionId, fileReferencesEnabled: true, onStageAttachments: stage });
+		await typeInComposer(field, "first question");
+		fireEvent.paste(field, { clipboardData: clipboardData([png("a.png")]) });
+		await waitFor(() => expect(stage).toHaveBeenCalledOnce());
+		await userEvent.keyboard("{Enter}");
+		const ref = captureFileReference({ path: "src/a.ts", side: "file", line: 1, endLine: 1, lines: [{ kind: "context", oldNo: 1, newNo: 1, text: "next context();" }] }, sessionId);
+		act(() => { expect(sendReferenceToChat(sessionId, ref)).toBe(false); });
+		expect(readChatSessionDraft(sessionId).composer.fileReferences ?? []).toEqual([]);
+		staging.resolve([".ao/attachments/a.png"]);
+		await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+		await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled());
+		act(() => { expect(sendReferenceToChat(sessionId, ref)).toBe(true); });
+		await waitFor(() => expect(readChatSessionDraft(sessionId).composer.fileReferences).toEqual([expect.objectContaining({ id: ref.id })]));
+		expect(onSend.mock.calls[0][5]).toBeUndefined();
+	});
 	it("lays attachments beside annotations and clears only annotation references", async () => {
 		const sessionId = "composer-shared-attachment-row";
 		writeChatExcerptReferences(sessionId, EXCERPTS);

@@ -3260,5 +3260,6 @@
 	"chat.draft.fileReferencesSideUnsupported": "File annotations cannot be sent to a side chat yet. Remove them or send this message in the main chat.",
 	"chat.draft.fileReferencesCompactUnsupported": "Remove file annotations before running /compact.",
 	"chat.fileAnnotationShowMore": "Mostrar mais",
-	"chat.fileAnnotationShowLess": "Mostrar menos"
+	"chat.fileAnnotationShowLess": "Mostrar menos",
+	"files.addToChatRejected": "A seleção não foi adicionada. Aguarde o envio terminar ou confira o rascunho e tente novamente."
 }

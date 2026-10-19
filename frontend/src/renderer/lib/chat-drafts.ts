@@ -1405,6 +1405,9 @@ export function writeChatFileReferences(
 	storage: DraftStorage | undefined = rendererStorage(),
 ): DraftWriteResult {
 	const loaded = loadChatSessionDraft(scope, storage);
+	// Preparation owns an exact snapshot before asynchronous attachment reads.
+	// Refuse a new selection rather than letting that snapshot overwrite it.
+	if (getChatComposerMutation(scope).pending) return { ok: false, draft: loaded.draft };
 	if (loaded.ok && JSON.stringify(loaded.draft.composer.fileReferences ?? []) === JSON.stringify(fileReferences)) {
 		return { ok: true, draft: loaded.draft };
 	}

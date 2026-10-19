@@ -440,16 +440,18 @@ export const ChatComposer = memo(function ChatComposer({
   if (!draftSessionId || !draftScope) return;
   return subscribeChatComposerReferences(draftSessionId, (reference) => {
    const draft = readChatSessionDraft(draftScope);
-   if (draft.composer.delivery) return;
+   if (getChatComposerMutation(draftScope).pending || draft.composer.delivery) return false;
    const files = draft.composer.fileReferences ?? [];
-   if(files.some(file => file.path===reference.path && file.side===reference.side && file.line===reference.line && file.endLine===reference.endLine && file.scope===reference.scope && file.commitSha===reference.commitSha && JSON.stringify(file.source)===JSON.stringify(reference.source) && JSON.stringify(file.lines)===JSON.stringify(reference.lines)))return;
-   if (files.length + (draft.composer.excerpts?.length ?? 0) >= 8) { setSendError("chat.draft.annotationLimit"); return; }
+   if(files.some(file => file.path===reference.path && file.side===reference.side && file.line===reference.line && file.endLine===reference.endLine && file.scope===reference.scope && file.commitSha===reference.commitSha && JSON.stringify(file.source)===JSON.stringify(reference.source) && JSON.stringify(file.lines)===JSON.stringify(reference.lines)))return true;
+   if (files.length + (draft.composer.excerpts?.length ?? 0) >= 8) { setSendError("chat.draft.annotationLimit"); return false; }
    const order = Math.max(Date.now(), ...files.map(item => item.order + 1), ...(draft.composer.excerpts ?? []).map(item => (item.order ?? 0) + 1));
    const result = writeChatFileReferences(draftScope, [...files, { ...reference, order }]);
    composerRevision.current = result.draft.composer.revision;
    setTextDraftPersistenceError(result.ok ? null : "chat.draft.saveFailed");
+			if (!result.ok) return false;
 			// The Chat surface may only now be coming forward from behind a file tab.
 			window.requestAnimationFrame(() => window.requestAnimationFrame(() => editor.current?.focus()));
+			return true;
 		});
 	}, [draftSessionId, draftScope]);
 	const restoredSeedKey = useRef<string | undefined>(undefined);
@@ -655,7 +657,7 @@ export const ChatComposer = memo(function ChatComposer({
 	}, [sendInFlight]);
 	const sendConcealed = sendInFlight && !concealExpired;
 	const canSend =
-		(hasText || staged) &&
+		hasDraft &&
 		(savingQueuedEdit || !busy) &&
 		!disabled &&
 		!steerPending &&

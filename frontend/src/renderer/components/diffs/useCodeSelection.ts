@@ -150,7 +150,7 @@ export type CodeSelectionSource = {
  * re-rendering the surface would redraw Pierre's rows and drop the very
  * selection it shows.
  */
-export function useCodeSelection(containerRef: RefObject<HTMLElement | null>, onAsk: (selection: CodeSelection) => void, enabled = true) {
+export function useCodeSelection(containerRef: RefObject<HTMLElement | null>, onAsk: (selection: CodeSelection) => boolean | void, enabled = true) {
 	const [store] = useState(createSelectionStore);
 	const selectionRef = useRef<CodeSelection | null>(null);
 	const onAskRef = useRef(onAsk);
@@ -160,7 +160,7 @@ export function useCodeSelection(containerRef: RefObject<HTMLElement | null>, on
 	const ask = useCallback((): boolean => {
 		const current = selectionRef.current;
 		if (!current) return false;
-		onAskRef.current(current);
+		if (onAskRef.current(current) === false) return false;
 		clearSelection(current.host);
 		return true;
 	}, []);
@@ -215,11 +215,6 @@ export function useCodeSelection(containerRef: RefObject<HTMLElement | null>, on
 			if (event.key === "Escape") {
 				clearSelection(current.host);
 				return;
-			}
-			// Cmd/Ctrl+L adds the selection to chat, as in Cursor.
-			if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "l" && ask()) {
-				event.preventDefault();
-				event.stopPropagation();
 			}
 		};
 		document.addEventListener("selectionchange", schedule);

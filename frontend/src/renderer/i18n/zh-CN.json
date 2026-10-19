@@ -3196,5 +3196,6 @@
 	"chat.draft.fileReferencesSideUnsupported": "File annotations cannot be sent to a side chat yet. Remove them or send this message in the main chat.",
 	"chat.draft.fileReferencesCompactUnsupported": "Remove file annotations before running /compact.",
 	"chat.fileAnnotationShowMore": "展开",
-	"chat.fileAnnotationShowLess": "收起"
+	"chat.fileAnnotationShowLess": "收起",
+	"files.addToChatRejected": "未添加所选内容。请等待当前发送完成，或检查草稿后重试。"
 }

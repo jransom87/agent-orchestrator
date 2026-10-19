@@ -97,7 +97,7 @@ export function ReadOnlyFileView({
 	// Highlighted code gets an "Ask in chat" button (or Cmd/Ctrl+L) while the
 	// session has a Chat composer; in edit mode a selection belongs to the editor.
 	const askInChat = useAskInChat(sessionId, hostId);
-	const codeSelection = useCodeSelection(containerRef, (selection) => askInChat?.({ ...codeReference(detail.path, selection, false), side: side === "before" ? "old" : "file", endSide: side === "before" ? "old" : "file", source, commitSha, scope, previousPath: detail.previousPath, fileFingerprint: detail.fileFingerprint, workspaceVersion: detail.workspaceVersion }), askInChat !== undefined && !editing);
+	const codeSelection = useCodeSelection(containerRef, (selection) => askInChat?.({ ...codeReference(detail.path, selection, false), side: side === "before" ? "old" : "file", endSide: side === "before" ? "old" : "file", source, commitSha, scope, previousPath: detail.previousPath, fileFingerprint: detail.fileFingerprint, workspaceVersion: detail.workspaceVersion }) ?? false, askInChat !== undefined && !editing);
 	if (detail.binary) {
 		if (detail.imageMediaType) {
 			return (

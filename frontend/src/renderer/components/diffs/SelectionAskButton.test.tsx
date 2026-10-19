@@ -8,6 +8,17 @@ function source(selection: Partial<CodeSelection> | null) {
 }
 
 describe("SelectionAskButton", () => {
+	it("reports a rejected click and keyboard request without discarding the selection", () => {
+		const onAsk = vi.fn(() => false);
+		const selected = source({ range: { start: 2, end: 4 }, point: { x: 120, y: 80 }, dragging: false });
+		render(<SelectionAskButton onAsk={onAsk} source={selected} />);
+		fireEvent.click(screen.getByRole("button", { name: "Add to chat" }));
+		expect(screen.getByRole("alert")).toHaveTextContent("Selection not added");
+		expect(selected.get()).not.toBeNull();
+		expect(fireEvent.keyDown(document, { key: "l", ctrlKey: true })).toBe(false);
+		expect(onAsk).toHaveBeenCalledTimes(2);
+		expect(screen.getByRole("button", { name: "Add to chat" })).toBeVisible();
+	});
 	it("shows nothing without a selection", () => {
 		render(<SelectionAskButton onAsk={vi.fn()} source={source(null)} />);
 		expect(screen.queryByRole("button")).not.toBeInTheDocument();
