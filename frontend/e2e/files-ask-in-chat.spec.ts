@@ -53,12 +53,12 @@ function quietEventStream(route: Parameters<Parameters<Page["route"]>[1]>[0]) {
 }
 
 /** Serves one changed file for `id`, and records what the session's chat sends. */
-async function stubWorkspace(page: Page, id: string) {
+async function stubWorkspace(page: Page, id: string, fullText = after) {
 	const sentToChat: Array<{ text: string; fileReferences: ChatFileReference[] }> = [];
 	const file = { path: filePath, status: "modified", additions: 2, deletions: 1, size: after.length, binary: false, editable: true, fileFingerprint: "fp-1" };
 	const detail = {
 		sessionId: id, path: filePath, status: "modified", additions: 2, deletions: 1, size: after.length, binary: false, deleted: false,
-		content: after, contentTruncated: false, diff: patch, diffTruncated: false, editable: true, fileFingerprint: "fp-1", workspaceVersion: "workspace-1",
+		content: fullText, contentTruncated: false, diff: patch, diffTruncated: false, editable: true, fileFingerprint: "fp-1", workspaceVersion: "workspace-1",
 	};
 	await page.route(`http://127.0.0.1:8080/api/v1/sessions/${id}/**`, async (route) => {
 		if (route.request().headers().accept?.includes("text/event-stream")) return quietEventStream(route);
@@ -74,7 +74,7 @@ async function stubWorkspace(page: Page, id: string) {
 		if (endpoint === "/workspace/history") return route.fulfill({ json: { sessionId: id, commits: [] } });
 		if (endpoint === "/workspace/file/revision") {
 			const side = url.searchParams.get("side") === "before" ? "before" : "after";
-			const content = side === "before" ? before : after;
+			const content = side === "before" ? before : fullText;
 			return route.fulfill({ json: { sessionId: id, path: filePath, side, binary: false, content, exists: true, size: content.length, truncated: false, workspaceVersion: "workspace-1", revision: side } });
 		}
 		if (endpoint === "/conversation/messages" && route.request().method() === "POST") {
@@ -87,7 +87,7 @@ async function stubWorkspace(page: Page, id: string) {
 }
 
 /** A Chat-mode worker with one changed file, opened on its Files tab. */
-async function openChatSession(page: Page) {
+async function openChatSession(page: Page, fullText = after) {
 	await installFakeAgent(page, { projectId, projectName: projectId, workers: [{ id: chatSession, provider: "codex", title: "Add to chat", mode: "chat" }] });
 	await page.route("http://127.0.0.1:8080/api/v1/**", async (route) => {
 		if (route.request().headers().accept?.includes("text/event-stream")) return quietEventStream(route);
@@ -105,7 +105,7 @@ async function openChatSession(page: Page) {
 		if (pathname === `/api/v1/sessions/${chatSession}/interface-transition`) return route.fulfill({ json: { supported: true, targetMode: "tui" } });
 		return route.fulfill({ json: { status: "ok" } });
 	});
-	const sentToChat = await stubWorkspace(page, chatSession);
+	const sentToChat = await stubWorkspace(page, chatSession, fullText);
 	const inspector = await openFilesTab(page, chatSession, projectId);
 	const composer = page.getByRole("combobox", { name: "Message the agent" });
 	await expect(composer).toBeVisible();
@@ -355,4 +355,20 @@ test("shortens only the displayed file preview and sends every captured row", as
 	expect(sentToChat[0].fileReferences[0].lines).toHaveLength(9);
 	expect(sentToChat[0].fileReferences[0].lines.at(-1)?.text).toBe("const value10 = 10;");
 	expect(sentToChat[0].fileReferences[0].truncated).toBe(false);
+});
+
+test("sends CRLF selections with blank and whitespace-only rows intact", async ({ page }) => {
+ const lines = after.split("\n");
+ lines.splice(12,5,"services:","","  web:"," \t","    image: example");
+ const fullText = lines.join("\r\n");
+ const {inspector,composer,sentToChat}=await openChatSession(page,fullText);
+ await inspector.getByRole("button",{name:"Open full file"}).click();
+ await selectText(page,row(page,CENTER,13),row(page,CENTER,17));
+ await askButton(page).getByRole("button",{name:"Add to chat"}).click();
+ await composer.focus();await page.keyboard.press("Enter");
+ await expect.poll(()=>sentToChat.length).toBe(1);
+ expect(sentToChat[0].fileReferences).toHaveLength(1);
+ const ref=sentToChat[0].fileReferences[0];
+ expect(ref.lines.map(row=>row.text)).toEqual(["services:","","  web:"," \t","    image: example"]);
+ expect(ref).toMatchObject({line:13,endLine:17,truncated:false});
 });

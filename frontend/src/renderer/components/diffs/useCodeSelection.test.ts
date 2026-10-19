@@ -79,6 +79,16 @@ describe("readCodeSelection", () => {
 		expect(selection?.range).toEqual({ start: 6, side: "deletions", end: 7, endSide: "deletions" });
 	});
 
+ it.each(["\n", "\r\n"])("captures blank rows and whitespace across split and unified surfaces (%j)", ending => {
+  for (const side of [undefined, "deletions", "additions"] as const) {
+   const host = surface([{ side, rows: [[1,"context","services:",1],[2,"context",ending,2],[3,"context"," \t"+ending,3],[4,"context","  web:",4]] }]);
+   select(host,rowAt(host,0,0),rowAt(host,0,3),6);
+   const ref=codeReference("docker-compose.yaml",readCodeSelection(host)!,side!==undefined);
+   expect(ref.lines.map(row=>row.text)).toEqual(["services:",""," \t","  web:"]);
+   expect(ref.lines.map(row=>row.newNo)).toEqual([1,2,3,4]);
+  }
+ });
+
 	it("leaves out a last line the selection only reaches the start of", () => {
 		const host = surface([{ rows: [[1, "context", "one", 1], [2, "context", "two", 2], [3, "context", "three", 3]] }]);
 		select(host, rowAt(host, 0, 0), rowAt(host, 0, 2), 0);

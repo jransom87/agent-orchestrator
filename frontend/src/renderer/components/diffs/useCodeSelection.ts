@@ -1,3 +1,4 @@
+import { normalizeCodeRowText } from "../../../shared/file-annotations";
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { FileCodeReference } from "../../../shared/file-annotations";
 import type { SelectedLineRange } from "@pierre/diffs";
@@ -34,7 +35,7 @@ function inDeletionsColumn(element: Element): boolean {
 function diffRow(element: Element): DiffRow {
 	const line = Number(element.getAttribute("data-line"));
 	const type = element.getAttribute("data-line-type") ?? "";
-	const text = element.textContent ?? "";
+	const text = normalizeCodeRowText(element.textContent ?? "");
 	if (type === "change-addition") return { kind: "add", oldNo: null, newNo: line, text };
 	if (type === "change-deletion") return { kind: "del", oldNo: line, newNo: null, text };
 	// Context rows carry their column's number, and the other side's as data-alt-line.

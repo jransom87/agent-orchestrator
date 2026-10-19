@@ -159,3 +159,29 @@ func TestMixedAnnotationDeliveryUsesAttachmentOrderWithoutMutatingStoredContent(
 		})
 	}
 }
+
+func TestFileReferenceBlankRowsValidateAndDeliverWithoutExtraLines(t *testing.T) {
+	ref := testFileReference()
+	ref.Side, ref.EndSide, ref.Path = "file", "file", "docker-compose.yaml"
+	ref.Line, ref.EndLine = 1, 5
+	texts := []string{"services:", "", "  web:", " \t", "    image: example"}
+	ref.Lines = nil
+	for i, text := range texts {
+		n := i + 1
+		ref.Lines = append(ref.Lines, ports.ChatFileReferenceLine{Kind: "context", OldNo: &n, NewNo: &n, Text: text})
+	}
+	msg := ports.ChatUserMessage{Text: "explain", Content: []ports.ChatContent{{Type: "file_reference", FileReference: &ref}}}
+	if err := validateFileReferenceContent(msg, "session"); err != nil {
+		t.Fatal(err)
+	}
+	delivered := excerptDeliveryMessage(msg)
+	if !strings.Contains(delivered.Text, strings.Join(texts, "\n")) || strings.Count(delivered.Text, "services:") != 1 {
+		t.Fatalf("blank rows changed during delivery: %q", delivered.Text)
+	}
+	for _, invalid := range []string{"\n", "\r\n", "a\nb", "a\x00b"} {
+		ref.Lines[1].Text = invalid
+		if err := validateFileReferenceContent(msg, "session"); err == nil {
+			t.Fatalf("accepted embedded control characters: %q", invalid)
+		}
+	}
+}

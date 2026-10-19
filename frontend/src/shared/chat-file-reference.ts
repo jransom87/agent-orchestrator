@@ -1,3 +1,4 @@
+import { normalizeCodeRowText } from "./file-annotations";
 import type { FileCodeReference, FileReferenceLine } from "./file-annotations";
 
 /** Durable user-supplied selection; source hints never authorize filesystem access. */
@@ -19,8 +20,9 @@ export function captureFileReference(selection: FileCodeReference, sessionId: st
 			truncated = true;
 			break;
 		}
-		const text = [...row.text].slice(0, Math.min(700, budget - 1)).join("");
-		truncated ||= text !== row.text;
+		const captured = normalizeCodeRowText(row.text);
+		const text = [...captured].slice(0, Math.min(700, budget - 1)).join("");
+		truncated ||= text !== captured;
 		lines.push({ ...row, text });
 		budget -= [...text].length + 1;
 	}

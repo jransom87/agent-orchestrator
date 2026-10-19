@@ -1,3 +1,11 @@
+/** Viewer rows may carry one LF/CRLF sentinel, including otherwise empty rows.
+ * Preserve whitespace and leave embedded/multiple line breaks invalid.
+ */
+export function normalizeCodeRowText(text: string): string {
+ const row = text.replace(/(?:\r\n|\r|\n)$/, "");
+ return /[\r\n]/.test(row) ? text : row;
+}
+
 export const MAX_FILE_ANNOTATION_MESSAGE_LENGTH = 4096;
 
 const MAX_FEEDBACK_LENGTH = 1800;
