@@ -1920,31 +1920,29 @@ func excerptDeliveryMessage(msg ports.ChatUserMessage) ports.ChatUserMessage {
 	// order without moving any non-annotation content or mutating durable data.
 	ordered := append([]ports.ChatContent(nil), msg.Content...)
 	var annotations []ports.ChatContent
-	annotationOrder := func(item ports.ChatContent) (int64, bool) {
+	var annotationSlots []int
+	annotationOrder := func(item ports.ChatContent) int64 {
 		if item.Type == "file_reference" && item.FileReference != nil {
-			return item.FileReference.Order, true
+			return item.FileReference.Order
 		}
 		if item.Type == "excerpt" && item.Excerpt != nil {
-			return item.Excerpt.Reference.Order, true
+			return item.Excerpt.Reference.Order
 		}
-		return 0, false
+		return 0
 	}
-	for _, item := range ordered {
-		if _, ok := annotationOrder(item); ok {
+	for i, item := range ordered {
+		if (item.Type == "file_reference" && item.FileReference != nil) || (item.Type == "excerpt" && item.Excerpt != nil) {
 			annotations = append(annotations, item)
+			annotationSlots = append(annotationSlots, i)
 		}
 	}
 	sort.SliceStable(annotations, func(i, j int) bool {
-		a, _ := annotationOrder(annotations[i])
-		b, _ := annotationOrder(annotations[j])
+		a := annotationOrder(annotations[i])
+		b := annotationOrder(annotations[j])
 		return a < b
 	})
-	next := 0
-	for i, item := range ordered {
-		if _, ok := annotationOrder(item); ok {
-			ordered[i] = annotations[next]
-			next++
-		}
+	for i, slot := range annotationSlots {
+		ordered[slot] = annotations[i]
 	}
 	content := make([]ports.ChatContent, 0, len(msg.Content))
 	var fallback strings.Builder

@@ -138,7 +138,7 @@ func TestMixedAnnotationDeliveryUsesAttachmentOrderWithoutMutatingStoredContent(
 				t.Fatalf("wrong annotation order: %s", delivery.Text)
 			}
 			separatorAt := strings.Index(delivery.Text, "internal separator")
-			if tc.chatFirst && !(chatAt < separatorAt && separatorAt < fileAt) || !tc.chatFirst && !(fileAt < separatorAt && separatorAt < chatAt) {
+			if tc.chatFirst && (chatAt >= separatorAt || separatorAt >= fileAt) || !tc.chatFirst && (fileAt >= separatorAt || separatorAt >= chatAt) {
 				t.Fatal("internal content moved out of its original slot")
 			}
 			if len(delivery.Content) != 2 || delivery.Content[0].Text != "ordinary content" || delivery.Content[1].Data != "image data" {
