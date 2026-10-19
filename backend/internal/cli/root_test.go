@@ -184,7 +184,6 @@ func TestTelemetryMetaClassifiesRegisteredCommandPaths(t *testing.T) {
 		"ao pty-host":                {},
 		"ao start":                   {},
 		"ao unreal-provider":         {},
-		"ao zcode-login":             {},
 	}
 
 	var failures []string
