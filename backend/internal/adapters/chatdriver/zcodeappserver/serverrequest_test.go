@@ -372,6 +372,92 @@ func TestUserInputIsParkedAndAnsweredWithActionAndContent(t *testing.T) {
 	}
 }
 
+// The captured user-input exchange (p6-user-input.ndjson): the request is
+// re-announced once, AO's accept reply matches the capture byte for byte, and
+// the server reports the resolution as permission.resolved decision:"modify"
+// (there is no userInput.resolved on the wire), which must clear the parked
+// request and read as input.resolved for the row AO shows.
+func TestUserInputFixtureResolvesThroughPermissionResolved(t *testing.T) {
+	conv, srv := startConversation(t)
+	lines := loadReplay(t, "p6-user-input.ndjson")
+	var requests []replayLine
+	var captured, resolved frame
+	for _, line := range lines {
+		switch {
+		case line.Dir == "in" && line.Frame.Method == zcodeproto.MethodInteractionRequestUserInput:
+			requests = append(requests, line)
+		case line.Dir == "out" && line.Frame.Method == "" && line.Frame.ID != nil && rawID(*line.Frame.ID) == "server-95":
+			captured = line.Frame
+		case line.Dir == "in" && line.Frame.Method == zcodeproto.MethodSessionEvent && strings.Contains(string(line.Frame.Params), `"permission.resolved"`):
+			resolved = line.Frame
+		}
+	}
+	if len(requests) != 2 || captured.Result == nil || resolved.Params == nil {
+		t.Fatalf("fixture lacks the exchange: %d requests", len(requests))
+	}
+	for _, line := range requests {
+		srv.push(marshalFrame(t, line.Frame))
+	}
+	requested := nextEvent(t, conv.Events(), ports.ChatEventInputRequested)
+	if requested.RequestID != "perm_89bfeb2e-6979-4b36-8e19-3de57f0696d2" || requested.Input == nil {
+		t.Fatalf("input.requested = %+v", requested)
+	}
+	if got := drainEvents(conv.Events(), 100*time.Millisecond); countKind(got, ports.ChatEventInputRequested) != 0 {
+		t.Fatalf("the re-announce produced a second input request: %+v", got)
+	}
+	if err := conv.ResolveInput(context.Background(), requested.RequestID, ports.ChatInputResponse{
+		Action: ports.ChatInputActionAccept, Content: map[string]any{"Proceed": "yes"},
+	}); err != nil {
+		t.Fatalf("ResolveInput: %v", err)
+	}
+	for _, id := range []string{"server-95", "server-96"} {
+		if reply := srv.awaitReply(id); !jsonEqual(reply.Result, captured.Result) {
+			t.Fatalf("reply to %s = %s, capture has %s", id, reply.Result, captured.Result)
+		}
+	}
+	srv.push(marshalFrame(t, resolved))
+	got := nextEvent(t, conv.Events(), ports.ChatEventInputResolved)
+	if got.RequestID != requested.RequestID {
+		t.Fatalf("input.resolved = %+v", got)
+	}
+	if err := conv.ResolveInput(context.Background(), requested.RequestID, ports.ChatInputResponse{Action: ports.ChatInputActionAccept}); !errors.Is(err, ports.ErrChatRequestNotPending) {
+		t.Fatalf("ResolveInput after the resolution = %v", err)
+	}
+}
+
+// Every re-announced id of one request gets the identical deny reply and the
+// server reports exactly one resolution (p5-approval-deny-every-id.ndjson).
+func TestApprovalDenyFixtureAnswersEveryAnnouncedID(t *testing.T) {
+	conv, srv := startConversation(t)
+	var ids []string
+	var denies []frame
+	for _, line := range loadReplay(t, "p5-approval-deny-every-id.ndjson") {
+		switch {
+		case line.Dir == "in" && line.Frame.Method == zcodeproto.MethodInteractionRequestPermission:
+			ids = append(ids, rawID(*line.Frame.ID))
+			srv.push(marshalFrame(t, line.Frame))
+		case line.Dir == "out" && line.Frame.Method == "" && line.Frame.ID != nil:
+			denies = append(denies, line.Frame)
+		}
+	}
+	if len(ids) != 3 || len(denies) != 3 {
+		t.Fatalf("fixture: %d announcements, %d replies", len(ids), len(denies))
+	}
+	requested := nextEvent(t, conv.Events(), ports.ChatEventApprovalRequested)
+	if got := drainEvents(conv.Events(), 100*time.Millisecond); countKind(got, ports.ChatEventApprovalRequested) != 0 {
+		t.Fatalf("re-announces produced extra approvals: %+v", got)
+	}
+	if err := conv.ResolveRequest(context.Background(), requested.RequestID, ports.ChatDecision{ID: "deny"}); err != nil {
+		t.Fatalf("ResolveRequest: %v", err)
+	}
+	for i, id := range ids {
+		reply := srv.awaitReply(id)
+		if reply.Error != nil || !jsonEqual(reply.Result, denies[i].Result) {
+			t.Fatalf("reply to %s = %+v, capture has %s", id, reply, denies[i].Result)
+		}
+	}
+}
+
 func TestCloseCancelsParkedUserInput(t *testing.T) {
 	conv, srv := startConversation(t)
 	srv.push(`{"id":"server-6","method":"interaction/requestUserInput","params":` + userInputParams + `}`)

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/persistenthost"
@@ -82,26 +84,30 @@ var _ ports.ChatDriverReconnector = (*Driver)(nil)
 // Harness reports which agent this driver serves.
 func (d *Driver) Harness() domain.AgentHarness { return domain.HarnessZcode }
 
-// capabilities is what the Phase 0 code structurally implements. Every entry
-// is STATIC until its probe runs; Phase 2 advertises only what Phase 1 proved
-// (DESIGN 2.4), and the driver stays out of registry.Build until then.
+// capabilities is exactly what the Phase 1 captures proved (DESIGN 8, "2b");
+// each entry names the fixture that is its evidence. Nothing STATIC is
+// advertised: no steer (session/send during a turn is refused -32010), no
+// compaction, fork, rollback or config options.
 func capabilities() ports.ChatCapabilities {
 	return ports.ChatCapabilities{
-		ports.ChatCapabilityStreaming:   true, // U2: model.streaming / part.delta
-		ports.ChatCapabilityTools:       true, // tool.updated
-		ports.ChatCapabilityApprovals:   true, // U5: interaction/requestPermission
-		ports.ChatCapabilityInterrupt:   true, // U4: session/stop
-		ports.ChatCapabilityResume:      true, // U7: session/resume
-		ports.ChatCapabilityInteractive: true, // U6: interaction/requestUserInput
-		ports.ChatCapabilityUsage:       true, // U9: turn.completed.usage / session/usage
+		ports.ChatCapabilityStreaming:   true, // model.streaming text_delta (p1-create-send-complete)
+		ports.ChatCapabilityApprovals:   true, // interaction/requestPermission under mode edit (p5-approval-allow)
+		ports.ChatCapabilityInterrupt:   true, // session/stop -> turn.completed cancelled (p4-stop)
+		ports.ChatCapabilityResume:      true, // session/resume in a new process with memory (p8-resume)
+		ports.ChatCapabilityTools:       true, // tool.updated scheduled/started/result (p5-approval-allow)
+		ports.ChatCapabilityInteractive: true, // interaction/requestUserInput (p6-user-input)
+		ports.ChatCapabilityUsage:       true, // turn.completed.usage, session/usage (p1, p9-usage-read-mcp)
+		ports.ChatCapabilityModels:      true, // settings.model.available, modelSelection (p7-models)
+		ports.ChatCapabilityHistory:     true, // session/read messages (p9-usage-read-mcp, p8-resume)
 	}
 }
 
 // Probe reports what this install can do without creating a conversation.
 //
 // Auth is layer 1 of DESIGN 2.4: the result is cached per harness for the
-// daemon's lifetime once it succeeds, so an expired one-hour token is only seen
-// here while the cache is cold; Start and Resume re-check it.
+// daemon's lifetime once it succeeds, so a credential that lapses later is only
+// seen here while the cache is cold; Start and Resume re-check it, and the chat
+// service drops the cached probe when they report ErrChatAuthRequired.
 func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 	if _, err := d.plugin.ResolveBinary(ctx); err != nil {
 		return nil, fmt.Errorf("%w: %w", ports.ErrChatDriverUnavailable, err)
@@ -109,9 +115,9 @@ func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 	if err := d.requireAuth(ctx); err != nil {
 		return nil, err
 	}
-	// TODO(Phase 1): the optional in-daemon spawn + runtime/capabilities read
-	// (STATIC `ii.runtimeCapabilities`) is not performed; binary presence and
-	// auth are the whole probe until a live run shows the method's shape.
+	// No throwaway spawn: binary presence and the plugin's auth answer are the
+	// whole probe. Every advertised capability is backed by a capture, not by
+	// a per-install runtime/capabilities read (STATIC, never exercised).
 	return capabilities(), nil
 }
 
@@ -171,6 +177,11 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 // createSession runs session/create on an open connection, answers the
 // runtime-preferences request through the router, subscribes and starts the
 // pump. On failure the conversation is terminated.
+//
+// The create params are the PROVEN set (p1-create-send-complete.ndjson,
+// p9-usage-read-mcp.ndjson): workspace, mode, titleGenerationEnabled:false
+// (a title costs a model call per session) and mcpServers. The reasoning
+// level is not a create param: it rides on each turn's modelSelection.
 func (d *Driver) createSession(ctx context.Context, conv *conversation, cfg sessionConfig) error {
 	mode, err := sessionMode(cfg.permissions, cfg.readOnly)
 	if err != nil {
@@ -181,7 +192,6 @@ func (d *Driver) createSession(ctx context.Context, conv *conversation, cfg sess
 	params := zcodeproto.SessionCreateParams{
 		Workspace:              zcodeproto.Workspace{WorkspacePath: cfg.workspacePath, WorkspaceKey: cfg.workspacePath},
 		Mode:                   mode,
-		ThoughtLevel:           cfg.effort,
 		MCPServers:             mcpServers(cfg.mcpServers),
 		TitleGenerationEnabled: &titleGeneration,
 	}
@@ -279,8 +289,9 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	}, &snapshot)
 	if err != nil {
 		if cfg.FreshIfMissing && isSessionNotFound(err) {
-			// Only on the "Session not found:" message (U7): the same code with
-			// "Session is not active:" is eviction, never a missing session.
+			// Only on the "Session not found:" message (PROVEN, p8-resume.ndjson):
+			// the same code with "Session is not active:" is eviction (STATIC),
+			// never a missing session.
 			if createErr := d.createSession(ctx, conv, sessionConfig{
 				workspacePath: cfg.WorkspacePath, permissions: cfg.Permissions, readOnly: cfg.ReadOnly,
 				effort: cfg.Effort, mcpServers: cfg.MCPServers, systemPrompt: cfg.SystemPrompt,
@@ -308,7 +319,12 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 }
 
 // mcpServers maps AO's stdio tool servers onto session/create.mcpServers
-// (STATIC, U13). HTTP servers have no documented shape and are skipped.
+// (PROVEN, p9-usage-read-mcp.ndjson). The list REPLACES the operator's global
+// config.mcp.servers for the session, which is intended: the global list is
+// what loads ~240k tokens of tool schema into every turn
+// (DESIGN-zcode-context-trim.md item 1), while AO's own `ao mcp` server is
+// the one the session needs. HTTP servers have no proven shape and are
+// skipped.
 func mcpServers(servers []ports.ChatMCPServerConfig) []zcodeproto.MCPServerConfig {
 	var out []zcodeproto.MCPServerConfig
 	for _, server := range servers {
@@ -316,10 +332,11 @@ func mcpServers(servers []ports.ChatMCPServerConfig) []zcodeproto.MCPServerConfi
 			continue
 		}
 		entry := zcodeproto.MCPServerConfig{
-			Name: server.Name, Command: server.Command, Args: server.Args, Isolation: "session",
+			Name: server.Name, Command: server.Command, Args: append([]string{}, server.Args...),
+			Env: []zcodeproto.EnvEntry{}, Isolation: "session",
 		}
-		for name, value := range server.Env {
-			entry.Env = append(entry.Env, zcodeproto.EnvEntry{Name: name, Value: value})
+		for _, name := range slices.Sorted(maps.Keys(server.Env)) {
+			entry.Env = append(entry.Env, zcodeproto.EnvEntry{Name: name, Value: server.Env[name]})
 		}
 		out = append(out, entry)
 	}

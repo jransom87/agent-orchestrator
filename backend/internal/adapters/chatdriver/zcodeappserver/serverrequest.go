@@ -33,6 +33,10 @@ var errConversationClosed = errors.New("conversation closed")
 type resolvedReply struct {
 	reply any
 	err   error
+	// method is what the request was, so a provider-side resolution of a
+	// user-input request can still be reported as input.resolved after the
+	// record left the pending map.
+	method string
 }
 
 // parkedRequest is one server->client request waiting on a person, shared by
@@ -256,8 +260,12 @@ func (c *conversation) parkUserInput(ctx context.Context, req serverRequest) (an
 		Summary:        inputRequestFrom(params).Message,
 		Input:          inputRequestFrom(params),
 	}
+	// toolCallId is indexed for user input too: the server resolves an
+	// answered AskUserQuestion through permission.resolved (PROVEN,
+	// p6-user-input.ndjson), which `Uhr` keys by toolCallId.
 	return c.park(ctx, &parkedRequest{
-		method: req.Method, requestID: params.RequestID, turnID: params.TurnID, questions: params.Questions,
+		method: req.Method, requestID: params.RequestID, toolCallID: params.ToolCallID,
+		turnID: params.TurnID, questions: params.Questions,
 	}, ev)
 }
 
@@ -350,7 +358,7 @@ func (c *conversation) refusePending(requestID string, err error) {
 	parked, ok := c.pending[requestID]
 	if ok {
 		c.forgetPendingLocked(parked)
-		c.rememberResolvedLocked(requestID, resolvedReply{err: err})
+		c.rememberResolvedLocked(requestID, resolvedReply{err: err, method: parked.method})
 	}
 	c.mu.Unlock()
 	if ok {
@@ -444,10 +452,9 @@ func (c *conversation) ResolveInput(ctx context.Context, requestID string, respo
 // userInputReplyContent shapes AO's form answer into the provider's accept
 // content. inputRequestFrom publishes a schema keyed by each question's header
 // (or text), so a generic AO client answers {<header>: value}; the provider
-// wants the answers keyed by question text under "answers".
-//
-// TODO(U6): STATIC reading of `uii`: content:{answers:{<question text>: value}}.
-// P6 decides between answers/{question}, answer_<i> and answer. Content that
+// wants the answers keyed by question text under "answers" (PROVEN,
+// p6-user-input.ndjson: {action:"accept", content:{answers:{"<question>":
+// "yes"}}} was accepted and the turn continued with the answer). Content that
 // already carries an "answers" key is forwarded verbatim.
 func userInputReplyContent(questions []zcodeproto.Question, content map[string]any) map[string]any {
 	if _, shaped := content["answers"]; shaped {
@@ -486,7 +493,7 @@ func userInputReplyContent(questions []zcodeproto.Question, content map[string]a
 // re-announce still in flight. Caller holds c.mu.
 func (c *conversation) settleLocked(parked *parkedRequest, reply any) {
 	c.forgetPendingLocked(parked)
-	c.rememberResolvedLocked(parked.requestID, resolvedReply{reply: reply})
+	c.rememberResolvedLocked(parked.requestID, resolvedReply{reply: reply, method: parked.method})
 	parked.resolve(reply, nil)
 }
 
@@ -512,7 +519,7 @@ func (c *conversation) discardPending(requestID string) {
 	parked, ok := c.pending[requestID]
 	if ok {
 		c.forgetPendingLocked(parked)
-		c.rememberResolvedLocked(requestID, resolvedReply{err: refusal})
+		c.rememberResolvedLocked(requestID, resolvedReply{err: refusal, method: parked.method})
 	}
 	c.mu.Unlock()
 	if ok {
@@ -520,6 +527,20 @@ func (c *conversation) discardPending(requestID string) {
 		// clears the frame ids without pretending to decide.
 		parked.resolve(nil, refusal)
 	}
+}
+
+// requestMethod reports which server request a requestId belongs to: parked,
+// or settled within the re-announce window. "" when unknown.
+func (c *conversation) requestMethod(requestID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if parked, ok := c.pending[requestID]; ok {
+		return parked.method
+	}
+	if settled, ok := c.recentlyResolved[requestID]; ok {
+		return settled.method
+	}
+	return ""
 }
 
 // requestIDForToolCall translates a toolCallId to the parked requestId, for a
@@ -560,7 +581,7 @@ func (c *conversation) reconcilePending(pendingRequestIDs []string, known bool) 
 			continue
 		}
 		c.forgetPendingLocked(parked)
-		c.rememberResolvedLocked(id, resolvedReply{err: refusal})
+		c.rememberResolvedLocked(id, resolvedReply{err: refusal, method: parked.method})
 		refuse = append(refuse, parked)
 	}
 	c.mu.Unlock()

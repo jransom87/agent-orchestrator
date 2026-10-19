@@ -29,18 +29,23 @@
 // skipped on a resume that already has turns, byte-for-byte what the TUI
 // adapter does for -p, so a -c restore sees the same first turn.
 //
-// Provenance. Everything in zcodeproto is tagged PROVEN (exercised by the
-// canonical probe) or STATIC (read from the minified bundle). The driver encodes
-// the STATIC answers and leaves every UNKNOWN (U-numbered in the design) behind
-// a seam: the runtimeHeadersResolver for U0, the message-prefix branch on -32004
-// for U7, the text-source latch for U2. Nothing here guesses.
+// Provenance. Everything in zcodeproto is tagged PROVEN (observed on the wire
+// during the Phase 1 probes; the frames live in testdata/*.ndjson, extracted
+// from the redacted captures in probes/captures/) or STATIC (read from the
+// minified bundle, never exercised). The advertised capabilities are exactly
+// the PROVEN set; STATIC behaviour stays behind fail-closed branches (the
+// runtimeHeadersResolver decline, the message-prefix branch on -32004, the
+// text-source latch). Nothing here guesses.
 //
-// Credentials. The zcode token is a raw one-hour OAuth JWT. This package never
-// reads, logs, prints or embeds it: AuthStatus is consulted through the agent
-// plugin, the credential store is pinned through AugmentRuntimeLaunchEnv, and
-// stderr (where the CLI's token logger writes) is discarded.
+// Credentials. The provider credential is an API key in an AO-owned personal
+// provider config that the agent plugin points the CLI at through
+// ZCODE_PERSONAL_PROVIDER_CONFIG_FILE (or a one-hour OAuth token in the
+// AO-owned store, the legacy route). This package never reads, logs, prints or
+// embeds either: AuthStatus is consulted through the agent plugin, the store
+// and config are pinned through AugmentRuntimeLaunchEnv, and stderr (where the
+// CLI's token logger writes) is discarded.
 //
-// Phase 0 ships the package without registering it in registry.Build: a
-// registered driver whose Probe succeeds changes spawn behaviour, and the
-// capability floor is unproven until the Phase 1 captures land.
+// Cost. session/create.mcpServers replaces the operator's global MCP server
+// list for the session (DESIGN-zcode-context-trim.md); without it every turn
+// carried ~270k input tokens of tool schema in the Phase 1 runs.
 package zcodeappserver

@@ -52,9 +52,10 @@ type conversation struct {
 	// launchMode is the permission mode the session was created or resumed
 	// with; a per-turn approval setting that differs is refused (U5).
 	launchMode ports.PermissionMode
-	// launchEffort is the thought level the session was created with. zcode
-	// has no per-turn thought level, so a per-turn effort that differs is
-	// refused rather than silently ignored (U8).
+	// launchEffort is the reasoning level the conversation was opened with
+	// (ChatStartConfig.Effort / ChatResumeConfig.Effort). It rides on every
+	// turn's modelSelection.options.reasoningLevel (PROVEN, p7-models) unless
+	// the turn names its own.
 	launchEffort string
 	events       chan ports.ChatEvent
 
@@ -226,6 +227,7 @@ func (c *conversation) pump() {
 	c.emit(ports.ChatEvent{Kind: ports.ChatEventControllerState, ControllerState: ports.ChatControllerReady})
 
 	for n := range c.conn.notifs() {
+		c.observeModelChange(n)
 		for _, ev := range normalizeNotification(n, c.turns, time.Now()) {
 			switch ev.Kind {
 			case ports.ChatEventApprovalResolved:
@@ -235,6 +237,13 @@ func (c *conversation) pump() {
 				}
 				if ev.RequestID == "" {
 					continue
+				}
+				if c.requestMethod(ev.RequestID) == zcodeproto.MethodInteractionRequestUserInput {
+					// An answered AskUserQuestion resolves as permission.resolved
+					// decision:"modify" (PROVEN, p6-user-input.ndjson); the row AO is
+					// showing for it is an input request, not an approval.
+					ev.Kind = ports.ChatEventInputResolved
+					ev.Detail = nil
 				}
 				// The provider resolved it (possibly elsewhere), so any card AO is
 				// still showing is stale. The remembered reply is kept: a re-announce
@@ -269,8 +278,10 @@ func (c *conversation) pump() {
 }
 
 // settleInterrupt turns the failed settlement of a turn AO itself stopped into
-// an interrupted one (U4: the exact settlement shape after session/stop is
-// unobserved, so both cancelled and failed are accepted).
+// an interrupted one. PROVEN (p4-stop.ndjson): session/stop settles the turn
+// with turn.completed resultType:"cancelled" (already interrupted) followed by
+// state.updated prompt_failed; the fallback path only matters when the
+// subscribed event was lost.
 func (c *conversation) settleInterrupt(ev ports.ChatEvent) ports.ChatEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -324,6 +335,26 @@ func (c *conversation) maybePollUsage(n notification, turnID string) {
 		}
 		c.emit(ports.ChatEvent{Kind: ports.ChatEventUsage, ProviderTurnID: turnID, Usage: usage})
 	}()
+}
+
+// observeModelChange refreshes the cached model catalog from a
+// state.updated{reason:"model_changed"} patch (PROVEN, p7-models.ndjson) so
+// ListModels reports the selection the session now runs on.
+func (c *conversation) observeModelChange(n notification) {
+	if n.Method != zcodeproto.MethodStateUpdated {
+		return
+	}
+	var p zcodeproto.StateUpdatedParams
+	if err := json.Unmarshal(n.Params, &p); err != nil || p.Reason != zcodeproto.ReasonModelChanged {
+		return
+	}
+	var patch zcodeproto.StateSettingsPatch
+	if err := json.Unmarshal(p.Patch, &patch); err != nil || patch.Model == nil {
+		return
+	}
+	c.mu.Lock()
+	c.snapshot.Settings.Model = *patch.Model
+	c.mu.Unlock()
 }
 
 // inlineUsagePresent reports whether a turn.completed carried a usage object.
@@ -399,27 +430,21 @@ func (c *conversation) SendTurn(ctx context.Context, msg ports.ChatUserMessage) 
 		// not a way to nudge the agent.
 		return ports.ChatTurnRef{}, errors.New("chat message text is empty")
 	}
-	if msg.Settings.Model != "" {
-		if _, ok := parseModelSelection(msg.Settings.Model); !ok {
-			return ports.ChatTurnRef{}, fmt.Errorf("%w: model id %q is not providerId/modelId",
-				ports.ErrChatConfigOptionInvalid, msg.Settings.Model)
-		}
+	// The model and reasoning level are resolved now, against the catalog the
+	// session advertised, so a choice the provider would fail the turn with
+	// (invalid_model_request, provider_not_found) is refused before anything
+	// is written.
+	if _, err := c.modelSelectionFor(msg.Settings.Model, msg.Settings.Effort); err != nil {
+		return ports.ChatTurnRef{}, err
 	}
 	if msg.Settings.Approval != "" &&
 		ports.NormalizePermissionMode(msg.Settings.Approval) != ports.NormalizePermissionMode(c.launchMode) {
 		// session/send carries no mode. A per-turn change would need
-		// session/setMode first (STATIC, DESIGN 4.4), which Phase 0 does not send:
-		// every mode other than the launch mode is one the U5 guard refuses.
+		// session/setMode first (STATIC, never exercised), so a mode other than
+		// the one the session was created with is refused rather than silently
+		// run under the wrong policy.
 		return ports.ChatTurnRef{}, fmt.Errorf("%w: zcode turns run under the session's launch mode; requested %q",
 			ports.ErrChatPermissionModeUnsupported, msg.Settings.Approval)
-	}
-	if msg.Settings.Effort != "" && msg.Settings.Effort != c.launchEffort {
-		// session/send carries no thought level (`QXt`); only session/create's
-		// thoughtLevel is known (STATIC, U8). Refusing is honest: ListModels
-		// advertises no efforts, so an explicit one is a value the provider did
-		// not offer, and dropping it silently would misreport what ran.
-		return ports.ChatTurnRef{}, fmt.Errorf("%w: zcode has no per-turn thought level (U8); requested %q",
-			ports.ErrChatCapabilityUnavailable, msg.Settings.Effort)
 	}
 
 	c.sendMu.Lock()
@@ -481,18 +506,20 @@ func (c *conversation) StartDeferredTurn(providerTurnID string) error {
 	c.mu.Unlock()
 
 	params := zcodeproto.SessionSendParams{SessionID: sessionID, Content: content, InputID: turn.id}
-	if turn.settings.Model != "" {
-		if selection, ok := parseModelSelection(turn.settings.Model); ok {
-			params.ModelSelection = &selection
-		}
+	selection, err := c.modelSelectionFor(turn.settings.Model, turn.settings.Effort)
+	if err != nil {
+		// SendTurn already validated this; the catalog can only have changed
+		// through a model_changed patch in between. The tracker is not armed yet.
+		return err
 	}
+	params.ModelSelection = selection
 
 	c.turns.prepare(turn.id)
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.sendTimeout)
 	defer cancel()
 	var result zcodeproto.SessionSendResult
-	err := c.sessionRequest(ctx, zcodeproto.MethodSessionSend, params, &result)
+	err = c.sessionRequest(ctx, zcodeproto.MethodSessionSend, params, &result)
 	if err == nil && !result.Accepted {
 		err = errors.New("session/send was not accepted")
 	}

@@ -1,6 +1,7 @@
 package zcodeappserver
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 
@@ -26,8 +27,16 @@ const providerTurnPrefix = "zcode-turn:"
 // them could be observed, so the tracker is armed with the minted id by
 // prepare() before the session/send frame is written, emits turn.started once on
 // the first of the three signals, and fills in the native id as it learns it.
-// Completion is likewise emitted once, preferring session/event turn.completed
-// or turn.failed over the state.updated prompt_* fallback, which is always last.
+// Completion is likewise emitted once, from session/event turn.completed or
+// turn.failed, with the state.updated prompt_* frame (always last on the wire)
+// as the fallback; the operation-event completion precedes the session event
+// and settles nothing.
+//
+// It also remembers what the proven wire splits across frames: a tool call's
+// input arrives on model.streaming{kind:"tool_call"} while tool.updated
+// scheduled says inputOmitted:true, and tool.updated result omits the tool
+// name (p5-approval-allow.ndjson); reasoning has no start frame, so the first
+// reasoning_delta of an assistant message must open its activity row.
 type turnTracker struct {
 	mu sync.Mutex
 
@@ -52,6 +61,12 @@ type turnTracker struct {
 	// toolTails remembers the last progress tail per tool call for the suffix
 	// diff of DESIGN 4.2.
 	toolTails map[string]string
+	// tools remembers each tool call's name and input for the frames that omit
+	// them (result carries neither; scheduled omits the input).
+	tools map[string]toolCall
+	// reasoningOpen records the reasoning activity rows already started this
+	// turn, keyed by their item id, so a delta never precedes its row.
+	reasoningOpen map[string]bool
 
 	// Mappings outlive the turn so Interrupt and fork anchors can translate
 	// after settlement. Bounded by the number of turns in one process.
@@ -59,11 +74,19 @@ type turnTracker struct {
 	mintedByNative map[string]string
 }
 
+// toolCall is what the tracker remembers about one tool call.
+type toolCall struct {
+	name  string
+	input json.RawMessage
+}
+
 func newTurnTracker() *turnTracker {
 	return &turnTracker{
 		nativeByMinted: make(map[string]string),
 		mintedByNative: make(map[string]string),
 		toolTails:      make(map[string]string),
+		tools:          make(map[string]toolCall),
+		reasoningOpen:  make(map[string]bool),
 	}
 }
 
@@ -147,6 +170,8 @@ func (t *turnTracker) openLocked(id, native string) {
 	t.replyItemID = ""
 	t.startedOut = false
 	t.toolTails = make(map[string]string)
+	t.tools = make(map[string]toolCall)
+	t.reasoningOpen = make(map[string]bool)
 	if native != "" {
 		t.nativeByMinted[id] = native
 		t.mintedByNative[native] = id
@@ -165,8 +190,11 @@ func (t *turnTracker) closeLocked() {
 
 // observeStarted folds one of the three start signals. It returns the
 // turn.started event exactly once per turn and nil for every later signal, which
-// only fills in the native id.
-func (t *turnTracker) observeStarted(native string) *ports.ChatEvent {
+// only fills in the native id. inputID is the session/send inputId echoed on
+// session/event turn.started (PROVEN, U3); when nothing is armed it names the
+// minted id directly, which is how a replayed start after a reconnect still
+// correlates with the turn AO prepared.
+func (t *turnTracker) observeStarted(native, inputID string) *ports.ChatEvent {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.open {
@@ -181,6 +209,8 @@ func (t *turnTracker) observeStarted(native string) *ports.ChatEvent {
 	switch {
 	case id != "":
 		t.pending = ""
+	case inputID != "" && !strings.HasPrefix(inputID, providerTurnPrefix):
+		id = inputID
 	case native != "":
 		id = providerTurnPrefix + native
 	default:
@@ -274,6 +304,57 @@ func (t *turnTracker) latchTextSource(kind string) bool {
 		t.textSource = kind
 	}
 	return t.textSource == kind
+}
+
+// rememberTool records a tool call's name and input as the streaming frames
+// reveal them; later frames that omit either read them back.
+func (t *turnTracker) rememberTool(toolCallID, name string, input json.RawMessage) {
+	if toolCallID == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	call := t.tools[toolCallID]
+	if name != "" {
+		call.name = name
+	}
+	if len(input) > 0 {
+		call.input = input
+	}
+	t.tools[toolCallID] = call
+}
+
+// tool returns what is known about a tool call so far.
+func (t *turnTracker) tool(toolCallID string) toolCall {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.tools[toolCallID]
+}
+
+// openReasoning reports whether the reasoning row for an item still needs its
+// activity.started, marking it open. The first reasoning_delta of a message
+// opens the row because the wire has no reasoning_start frame.
+func (t *turnTracker) openReasoning(itemID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.reasoningOpen[itemID] {
+		return false
+	}
+	t.reasoningOpen[itemID] = true
+	return true
+}
+
+// closeReasoning forgets an open reasoning row and reports whether one was
+// open, so the row can be completed when the message moves on to text or a
+// tool call.
+func (t *turnTracker) closeReasoning(itemID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.reasoningOpen[itemID] {
+		return false
+	}
+	delete(t.reasoningOpen, itemID)
+	return true
 }
 
 // nativeFor translates a minted id to the provider's turn id, or "".

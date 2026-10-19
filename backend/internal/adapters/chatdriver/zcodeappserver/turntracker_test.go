@@ -17,7 +17,7 @@ func TestCancelAfterStartOrdersTheFailureAfterTurnStarted(t *testing.T) {
 	t.Run("turn.started not yet on the stream", func(t *testing.T) {
 		tracker := newTurnTracker()
 		tracker.prepare("minted-1")
-		if ev := tracker.observeStarted(""); ev == nil {
+		if ev := tracker.observeStarted("", ""); ev == nil {
 			t.Fatal("observeStarted emitted nothing")
 		}
 		if tracker.cancel("minted-1", failure) {
@@ -38,7 +38,7 @@ func TestCancelAfterStartOrdersTheFailureAfterTurnStarted(t *testing.T) {
 	t.Run("turn.started already on the stream", func(t *testing.T) {
 		tracker := newTurnTracker()
 		tracker.prepare("minted-1")
-		tracker.observeStarted("t-native")
+		tracker.observeStarted("t-native", "")
 		if tracker.markStartedEmitted("minted-1") != nil {
 			t.Fatal("nothing should be pending before a cancel")
 		}
@@ -68,7 +68,7 @@ func TestAdoptCorrelatesWithoutEmitting(t *testing.T) {
 	if tracker.active() != "durable" || tracker.mintedFor("t-native") != "durable" || tracker.nativeFor("durable") != "t-native" {
 		t.Fatal("adopted turn not correlated")
 	}
-	if ev := tracker.observeStarted("t-native"); ev != nil {
+	if ev := tracker.observeStarted("t-native", ""); ev != nil {
 		t.Fatalf("a start signal for the adopted turn emitted %+v", ev)
 	}
 	completed := tracker.observeCompleted(domain.TurnStateCompleted, nil)

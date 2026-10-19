@@ -32,31 +32,261 @@ func armedTracker(t *testing.T) *turnTracker {
 	t.Helper()
 	tracker := newTurnTracker()
 	tracker.prepare("minted-1")
-	if ev := tracker.observeStarted("t-native"); ev == nil || ev.ProviderTurnID != "minted-1" {
+	if ev := tracker.observeStarted("t-native", ""); ev == nil || ev.ProviderTurnID != "minted-1" {
 		t.Fatalf("observeStarted = %+v", ev)
 	}
 	return tracker
 }
 
-func TestReplayFixtureNotificationsNormalizeWithoutPanic(t *testing.T) {
+// normalizeFixture runs every notification of a fixture through a tracker
+// armed with one minted turn and returns the events in order.
+func normalizeFixture(t *testing.T, name string) []ports.ChatEvent {
+	t.Helper()
 	tracker := newTurnTracker()
 	tracker.prepare("minted-1")
-	var started int
-	for _, line := range loadReplay(t, "proven-create-send.ndjson") {
-		if line.Dir != "in" || line.Frame.ID != nil || line.Frame.Method == "" {
-			continue
-		}
-		for _, ev := range normalize(tracker, notification{Method: line.Frame.Method, Params: line.Frame.Params}) {
-			if ev.Kind == ports.ChatEventTurnStarted {
-				started++
-				if ev.ProviderTurnID != "minted-1" {
-					t.Fatalf("turn.started id = %q", ev.ProviderTurnID)
-				}
+	var events []ports.ChatEvent
+	for _, n := range fixtureNotifications(t, name) {
+		events = append(events, normalize(tracker, n)...)
+	}
+	return events
+}
+
+func kinds(events []ports.ChatEvent) []ports.ChatEventKind {
+	out := make([]ports.ChatEventKind, 0, len(events))
+	for _, ev := range events {
+		out = append(out, ev.Kind)
+	}
+	return out
+}
+
+func TestEveryFixtureNotificationNormalizesWithoutPanic(t *testing.T) {
+	for _, name := range fixtureNames(t) {
+		t.Run(name, func(t *testing.T) {
+			tracker := newTurnTracker()
+			tracker.prepare("minted-1")
+			for _, n := range fixtureNotifications(t, name) {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Fatalf("%s panicked: %v", n.Method, r)
+						}
+					}()
+					for _, ev := range normalize(tracker, n) {
+						if ev.ProviderTurnID != "" && ev.ProviderTurnID != "minted-1" {
+							t.Fatalf("%s emitted turn %q, want minted-1", n.Method, ev.ProviderTurnID)
+						}
+					}
+				}()
+			}
+		})
+	}
+}
+
+// The proven turn (p1-create-send-complete.ndjson): one turn.started on
+// prompt_started, a reasoning row opened by its first delta and closed by the
+// text, the streamed text, the committed response, the usage, one settlement
+// from session/event, and nothing from the operation-event/prompt_completed
+// fallbacks that follow.
+func TestP1FixtureProducesTheProvenTurnLifecycle(t *testing.T) {
+	events := normalizeFixture(t, "p1-create-send-complete.ndjson")
+	want := []ports.ChatEventKind{
+		ports.ChatEventTurnStarted,
+		ports.ChatEventActivityStarted, ports.ChatEventReasoningDelta,
+		ports.ChatEventActivityCompleted, ports.ChatEventMessageDelta,
+	}
+	got := kinds(events)
+	if len(got) < len(want) || !reflect.DeepEqual(got[:len(want)], want) {
+		t.Fatalf("events = %v, want prefix %v", got, want)
+	}
+	tail := []ports.ChatEventKind{ports.ChatEventMessageCompleted, ports.ChatEventUsage, ports.ChatEventTurnCompleted}
+	if !reflect.DeepEqual(got[len(got)-len(tail):], tail) {
+		t.Fatalf("events = %v, want suffix %v", got, tail)
+	}
+	if n := countKind(events, ports.ChatEventTurnStarted); n != 1 {
+		t.Fatalf("turn.started count = %d", n)
+	}
+	if n := countKind(events, ports.ChatEventTurnCompleted); n != 1 {
+		t.Fatalf("turn.completed count = %d", n)
+	}
+	started := events[0]
+	if started.ProviderTurnID != "minted-1" || started.NativeTurnID != "" {
+		t.Fatalf("turn.started = %+v (prompt_started carries no native id)", started)
+	}
+	var text string
+	var reply ports.ChatEvent
+	for _, ev := range events {
+		switch ev.Kind {
+		case ports.ChatEventMessageDelta:
+			text += ev.Delta
+		case ports.ChatEventMessageCompleted:
+			reply = ev
+		case ports.ChatEventReasoningDelta:
+			if !strings.HasPrefix(ev.ProviderItemID, "zcode-reasoning:msg_") {
+				t.Fatalf("reasoning item = %q, want keyed by assistantMessageId", ev.ProviderItemID)
 			}
 		}
 	}
-	if started != 1 {
-		t.Fatalf("turn.started count over the proven capture = %d, want 1 (prompt_started)", started)
+	if text != "OK" || reply.Text != "OK" || !strings.HasPrefix(reply.ProviderItemID, "msg_") {
+		t.Fatalf("streamed %q, committed %+v", text, reply)
+	}
+	completed := events[len(events)-1]
+	if completed.TurnState != domain.TurnStateCompleted || completed.NativeTurnID != "turn_be5eae50-2260-43ca-bf5d-1daa514d20e1" || completed.Err != nil {
+		t.Fatalf("turn.completed = %+v", completed)
+	}
+}
+
+// Tool use (p5-approval-allow.ndjson): tool_input_* and tool_call feed the
+// tracker, scheduled/started open the row with the remembered input, result
+// (which carries no toolName) completes it as a command with its output and
+// exit code, batch emits nothing, and the resolution clears the approval.
+func TestP5FixtureProducesTheToolLifecycle(t *testing.T) {
+	events := normalizeFixture(t, "p5-approval-allow.ndjson")
+	var started, completed []ports.ChatEvent
+	for _, ev := range events {
+		if ev.ProviderItemID != "call_f691a8ba78244f5391326953" {
+			continue
+		}
+		switch ev.Kind {
+		case ports.ChatEventActivityStarted:
+			started = append(started, ev)
+		case ports.ChatEventActivityCompleted:
+			completed = append(completed, ev)
+		}
+	}
+	// operation-event tool-scheduled, tool.updated scheduled, operation-event
+	// tool-started, tool.updated started: four starts on one item, all folded.
+	if len(started) != 4 {
+		t.Fatalf("activity.started count = %d: %+v", len(started), started)
+	}
+	for _, ev := range started {
+		if ev.ActivityKind != domain.ActivityKindCommand || ev.Summary != "Run date" || !strings.Contains(string(ev.Detail), `"command":"date"`) {
+			t.Fatalf("activity.started = %+v (input must come from model.streaming tool_call)", ev)
+		}
+	}
+	if len(completed) != 1 {
+		t.Fatalf("activity.completed count = %d: %+v", len(completed), completed)
+	}
+	result := completed[0]
+	if result.ActivityKind != domain.ActivityKindCommand || result.ActivityStatus != domain.ActivityStatusCompleted || result.Summary != "Run date" {
+		t.Fatalf("activity.completed = %+v (toolName is not on the result frame)", result)
+	}
+	for _, want := range []string{`"toolName":"Bash"`, `"exitCode":0`, `"durationMs":597`, `"output":"Mon Oct 19`} {
+		if !strings.Contains(string(result.Detail), want) {
+			t.Fatalf("detail %s lacks %s", result.Detail, want)
+		}
+	}
+	resolved := -1
+	for i, ev := range events {
+		if ev.Kind == ports.ChatEventApprovalResolved {
+			resolved = i
+			if ev.RequestID != "perm_97f65e85-d752-4fcd-bb8e-be66c1cd9170" || !strings.Contains(string(ev.Detail), `"decision":"allow"`) {
+				t.Fatalf("approval.resolved = %+v", ev)
+			}
+		}
+	}
+	if resolved < 0 {
+		t.Fatalf("no approval.resolved among %v", kinds(events))
+	}
+	last := events[len(events)-1]
+	if last.Kind != ports.ChatEventTurnCompleted || last.TurnState != domain.TurnStateCompleted {
+		t.Fatalf("last event = %+v", last)
+	}
+	if countKind(events, ports.ChatEventMessageCompleted) != 1 || countKind(events, ports.ChatEventUsage) != 1 {
+		t.Fatalf("events = %v", kinds(events))
+	}
+}
+
+// Interrupt (p4-stop.ndjson): session/stop settles the turn as interrupted
+// through turn.completed resultType:"cancelled" with an empty committed
+// response, and the operation-event/prompt_failed frames that follow settle
+// nothing more.
+func TestP4FixtureSettlesACancelledTurnAsInterrupted(t *testing.T) {
+	events := normalizeFixture(t, "p4-stop.ndjson")
+	if countKind(events, ports.ChatEventTurnCompleted) != 1 {
+		t.Fatalf("events = %v", kinds(events))
+	}
+	var completed, message ports.ChatEvent
+	for _, ev := range events {
+		switch ev.Kind {
+		case ports.ChatEventTurnCompleted:
+			completed = ev
+		case ports.ChatEventMessageCompleted:
+			message = ev
+		}
+	}
+	if completed.TurnState != domain.TurnStateInterrupted || completed.Err != nil {
+		t.Fatalf("turn.completed = %+v, want interrupted", completed)
+	}
+	if message.Kind == "" || message.Text != "" {
+		t.Fatalf("message.completed = %+v, want the empty committed response", message)
+	}
+	if countKind(events, ports.ChatEventUsage) != 0 {
+		t.Fatal("a cancelled turn carried usage")
+	}
+}
+
+// Provider failure (p1-turn-failed-provider.ndjson): turn.failed settles the
+// turn failed with the provider's code, message, detail and attribution, and
+// no auth cause.
+func TestTurnFailedFixtureCarriesCodeMessageDetailAndAttribution(t *testing.T) {
+	events := normalizeFixture(t, "p1-turn-failed-provider.ndjson")
+	if countKind(events, ports.ChatEventTurnCompleted) != 1 {
+		t.Fatalf("events = %v", kinds(events))
+	}
+	completed := events[len(events)-1]
+	if completed.Kind != ports.ChatEventTurnCompleted || completed.TurnState != domain.TurnStateFailed || completed.Err == nil {
+		t.Fatalf("last event = %+v", completed)
+	}
+	text := completed.Err.Error()
+	for _, want := range []string{"[1113][Insufficient balance", "Turn execution failed", "provider=zai-api-ao provider_code=1113", "status=429", "retryable=false"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("failure %q lacks %q", text, want)
+		}
+	}
+	if errors.Is(completed.Err, ports.ErrChatAuthRequired) {
+		t.Fatal("turn.failed attached an auth cause without a proven native signal")
+	}
+}
+
+func TestProviderFailureRendering(t *testing.T) {
+	cases := []struct {
+		name string
+		err  zcodeproto.ProtocolErrorDetail
+		want []string
+	}{
+		{
+			name: "configuration error (run 1)",
+			err:  zcodeproto.ProtocolErrorDetail{Type: "unknown_error", Code: "CONFIGURATION_ERROR", Message: "Select a model before continuing", Detail: "Model creation failed", Attribution: &zcodeproto.ErrorAttribution{Retryable: false}},
+			want: []string{"Select a model before continuing", "Model creation failed", "code: CONFIGURATION_ERROR"},
+		},
+		{
+			name: "invalid model request (p7)",
+			err:  zcodeproto.ProtocolErrorDetail{Code: "invalid_model_request", Message: "Reasoning level is required for zai-api-ao/GLM-5.3", Detail: "Model creation failed"},
+			want: []string{"Reasoning level is required", "code: invalid_model_request"},
+		},
+		{
+			name: "attribution without a detail line",
+			err:  zcodeproto.ProtocolErrorDetail{Code: "1113", Message: "[1113][quota]", Attribution: &zcodeproto.ErrorAttribution{Source: "provider", StatusCode: 429, ProviderErrorCode: "1113"}},
+			want: []string{"[1113][quota]", "attribution: source=provider status=429 providerErrorCode=1113 retryable=false"},
+		},
+		{
+			name: "message falls back to the underlying one",
+			err:  zcodeproto.ProtocolErrorDetail{UnderlyingErrorMessage: "boom"},
+			want: []string{"boom"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := providerFailure(tc.err).Error()
+			for _, want := range tc.want {
+				if !strings.Contains(text, want) {
+					t.Fatalf("%q lacks %q", text, want)
+				}
+			}
+			if strings.Contains(text, "code: 1113") {
+				t.Fatalf("%q repeats a code the message already carries", text)
+			}
+		})
 	}
 }
 
@@ -69,7 +299,7 @@ func TestNormalizeTable(t *testing.T) {
 	}{
 		{
 			name: "text delta via model.streaming",
-			n:    sessionEvent("model.streaming", "t-native", `{"kind":"text_delta","delta":"He","assistantMessageId":"msg-1"}`),
+			n:    sessionEvent("model.streaming", "t-native", `{"kind":"text_delta","delta":"He","assistantMessageId":"msg-1","done":false}`),
 			kind: ports.ChatEventMessageDelta,
 			check: func(t *testing.T, ev ports.ChatEvent) {
 				if ev.Delta != "He" || ev.ProviderItemID != "msg-1" || ev.ProviderTurnID != "minted-1" {
@@ -78,27 +308,37 @@ func TestNormalizeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "reasoning start",
-			n:    sessionEvent("model.streaming", "t-native", `{"kind":"reasoning_start","partId":"p1"}`),
+			name: "first reasoning delta opens the row",
+			n:    sessionEvent("model.streaming", "t-native", `{"kind":"reasoning_delta","assistantMessageId":"msg-1","delta":"hmm"}`),
 			kind: ports.ChatEventActivityStarted,
 			check: func(t *testing.T, ev ports.ChatEvent) {
-				if ev.ActivityKind != domain.ActivityKindReasoning || ev.ProviderItemID != "zcode-reasoning:p1" || ev.Summary != "Reasoning" {
+				if ev.ActivityKind != domain.ActivityKindReasoning || ev.ProviderItemID != "zcode-reasoning:msg-1" || ev.Summary != "Reasoning" {
 					t.Fatalf("activity.started = %+v", ev)
 				}
 			},
 		},
 		{
 			name: "reasoning delta",
-			n:    sessionEvent("model.streaming", "t-native", `{"kind":"reasoning_delta","partId":"p1","delta":"hmm"}`),
+			n:    sessionEvent("model.streaming", "t-native", `{"kind":"reasoning_delta","assistantMessageId":"msg-1","delta":"hmm"}`),
 			kind: ports.ChatEventReasoningDelta,
 			check: func(t *testing.T, ev ports.ChatEvent) {
-				if ev.Delta != "hmm" || ev.ProviderItemID != "zcode-reasoning:p1" {
+				if ev.Delta != "hmm" || ev.ProviderItemID != "zcode-reasoning:msg-1" {
 					t.Fatalf("reasoning.delta = %+v", ev)
 				}
 			},
 		},
 		{
-			name: "tool scheduled",
+			name: "STATIC reasoning_start opens the row",
+			n:    sessionEvent("model.streaming", "t-native", `{"kind":"reasoning_start","partId":"p1"}`),
+			kind: ports.ChatEventActivityStarted,
+			check: func(t *testing.T, ev ports.ChatEvent) {
+				if ev.ActivityKind != domain.ActivityKindReasoning || ev.ProviderItemID != "zcode-reasoning:minted-1" {
+					t.Fatalf("activity.started = %+v", ev)
+				}
+			},
+		},
+		{
+			name: "tool scheduled with inline input",
 			n:    sessionEvent("tool.updated", "t-native", `{"kind":"scheduled","toolCallId":"tc1","toolName":"Bash","input":{"command":"date"}}`),
 			kind: ports.ChatEventActivityStarted,
 			check: func(t *testing.T, ev ports.ChatEvent) {
@@ -131,17 +371,17 @@ func TestNormalizeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "tool result completes the activity",
-			n:    sessionEvent("tool.updated", "t-native", `{"kind":"result","toolCallId":"tc1","toolName":"Bash","result":{"exitCode":0},"duration":12}`),
+			name: "failed tool result fails the activity",
+			n:    sessionEvent("tool.updated", "t-native", `{"kind":"result","toolCallId":"tc1","result":{"success":false,"content":"boom"},"duration":12}`),
 			kind: ports.ChatEventActivityCompleted,
 			check: func(t *testing.T, ev ports.ChatEvent) {
-				if ev.ActivityStatus != domain.ActivityStatusCompleted || !strings.Contains(string(ev.Detail), `"durationMs":12`) {
+				if ev.ActivityStatus != domain.ActivityStatusFailed || !strings.Contains(string(ev.Detail), `"durationMs":12`) || !strings.Contains(string(ev.Detail), `"output":"boom"`) {
 					t.Fatalf("activity.completed = %+v", ev)
 				}
 			},
 		},
 		{
-			name: "tool error fails the activity",
+			name: "STATIC tool error fails the activity",
 			n:    sessionEvent("tool.updated", "t-native", `{"kind":"error","toolCallId":"tc1","toolName":"Bash","error":{"message":"boom"}}`),
 			kind: ports.ChatEventActivityCompleted,
 			check: func(t *testing.T, ev ports.ChatEvent) {
@@ -172,13 +412,13 @@ func TestNormalizeTable(t *testing.T) {
 					t.Fatalf("native id = %q", ev.NativeTurnID)
 				}
 				if errors.Is(ev.Err, ports.ErrChatAuthRequired) {
-					t.Fatal("turn.failed attached an auth cause without a proven native signal (U12)")
+					t.Fatal("turn.failed attached an auth cause without a proven native signal")
 				}
 			},
 		},
 		{
 			name: "turn completed with usage",
-			n:    sessionEvent("turn.completed", "t-native", `{"response":"OK","resultType":"success","usage":{"inputTokens":10,"outputTokens":2,"cacheReadTokens":1,"totalTokens":12}}`),
+			n:    sessionEvent("turn.completed", "t-native", `{"response":"OK","resultType":"success","usage":{"source":"provider","inputTokens":10,"outputTokens":2,"cacheReadTokens":1,"totalTokens":12}}`),
 			kind: ports.ChatEventUsage,
 			check: func(t *testing.T, ev ports.ChatEvent) {
 				if ev.Usage == nil || ev.Usage.InputTokens != 10 || ev.Usage.CachedTokens != 1 || !ev.Usage.TotalsKnown || ev.Usage.ContextKnown {
@@ -188,7 +428,7 @@ func TestNormalizeTable(t *testing.T) {
 		},
 		{
 			name: "cancelled result type is interrupted",
-			n:    sessionEvent("turn.completed", "t-native", `{"resultType":"cancelled"}`),
+			n:    sessionEvent("turn.completed", "t-native", `{"resultType":"cancelled","response":""}`),
 			kind: ports.ChatEventTurnCompleted,
 			check: func(t *testing.T, ev ports.ChatEvent) {
 				if ev.TurnState != domain.TurnStateInterrupted {
@@ -198,7 +438,7 @@ func TestNormalizeTable(t *testing.T) {
 		},
 		{
 			name: "title updated",
-			n:    sessionEvent("session.titleUpdated", "", `{"title":"Fix the build"}`),
+			n:    sessionEvent("session.titleUpdated", "", `{"title":"Fix the build","previousTitle":"","source":"first_input"}`),
 			kind: ports.ChatEventThreadRenamed,
 			check: func(t *testing.T, ev ports.ChatEvent) {
 				if ev.Title != "Fix the build" {
@@ -207,7 +447,7 @@ func TestNormalizeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "session closed is recorded, never torn down",
+			name: "STATIC session closed is recorded, never torn down",
 			n:    sessionEvent("session.closed", "", `{}`),
 			kind: ports.ChatEventThreadState,
 			check: func(t *testing.T, ev ports.ChatEvent) {
@@ -217,7 +457,7 @@ func TestNormalizeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "operation-event session-closed",
+			name: "STATIC operation-event session-closed",
 			n:    notif(zcodeproto.MethodComputerUseOperationEvent, `{"kind":"session-closed","sessionId":"sess-1"}`),
 			kind: ports.ChatEventThreadState,
 			check: func(t *testing.T, ev ports.ChatEvent) {
@@ -227,7 +467,7 @@ func TestNormalizeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "runtime headers cancelled is an error event",
+			name: "STATIC runtime headers cancelled is an error event",
 			n:    notif(zcodeproto.MethodInteractionProviderRuntimeHeadersCancelled, `{"sessionId":"sess-1"}`),
 			kind: ports.ChatEventError,
 			check: func(t *testing.T, ev ports.ChatEvent) {
@@ -237,7 +477,7 @@ func TestNormalizeTable(t *testing.T) {
 			},
 		},
 		{
-			name: "user input resolved",
+			name: "STATIC user input resolved",
 			n:    sessionEvent("userInput.resolved", "t-native", `{"requestId":"q1","action":"accept"}`),
 			kind: ports.ChatEventInputResolved,
 			check: func(t *testing.T, ev ports.ChatEvent) {
@@ -248,7 +488,7 @@ func TestNormalizeTable(t *testing.T) {
 		},
 		{
 			name: "permission resolved with requestId",
-			n:    sessionEvent("permission.resolved", "t-native", `{"requestId":"r1","toolCallId":"tc1","decision":"allow"}`),
+			n:    sessionEvent("permission.resolved", "t-native", `{"requestId":"r1","toolCallId":"tc1","decision":"allow","reason":"Approved once"}`),
 			kind: ports.ChatEventApprovalResolved,
 			check: func(t *testing.T, ev ports.ChatEvent) {
 				if ev.RequestID != "r1" || !strings.Contains(string(ev.Detail), `"toolCallId":"tc1"`) {
@@ -273,6 +513,30 @@ func TestNormalizeTable(t *testing.T) {
 			}
 			tc.check(t, *found)
 		})
+	}
+}
+
+func TestReasoningRowOpensOnceAndClosesWhenTheMessageMovesOn(t *testing.T) {
+	tracker := armedTracker(t)
+	first := normalize(tracker, sessionEvent("model.streaming", "t-native", `{"kind":"reasoning_delta","assistantMessageId":"m1","delta":"a"}`))
+	if !reflect.DeepEqual(kinds(first), []ports.ChatEventKind{ports.ChatEventActivityStarted, ports.ChatEventReasoningDelta}) {
+		t.Fatalf("first reasoning delta = %v", kinds(first))
+	}
+	second := normalize(tracker, sessionEvent("model.streaming", "t-native", `{"kind":"reasoning_delta","assistantMessageId":"m1","delta":"b"}`))
+	if !reflect.DeepEqual(kinds(second), []ports.ChatEventKind{ports.ChatEventReasoningDelta}) {
+		t.Fatalf("second reasoning delta = %v", kinds(second))
+	}
+	// A tool call closes the row (p5: reasoning, then tool_input_start).
+	closed := normalize(tracker, sessionEvent("model.streaming", "t-native", `{"kind":"tool_input_start","assistantMessageId":"m1","toolCallId":"tc1","toolName":"Bash"}`))
+	if len(closed) != 1 || closed[0].Kind != ports.ChatEventActivityCompleted || closed[0].ProviderItemID != "zcode-reasoning:m1" || closed[0].ActivityStatus != domain.ActivityStatusCompleted {
+		t.Fatalf("tool_input_start = %+v", closed)
+	}
+	if got := normalize(tracker, sessionEvent("model.streaming", "t-native", `{"kind":"text_delta","assistantMessageId":"m1","delta":"x"}`)); len(got) != 1 || got[0].Kind != ports.ChatEventMessageDelta {
+		t.Fatalf("text after a closed reasoning row = %v", kinds(got))
+	}
+	// The tool name learned on tool_input_start serves the result frame.
+	if got := normalize(tracker, sessionEvent("tool.updated", "t-native", `{"kind":"result","toolCallId":"tc1","result":{"success":true,"content":"ok"},"duration":1}`)); len(got) != 1 || !strings.Contains(string(got[0].Detail), `"toolName":"Bash"`) {
+		t.Fatalf("result after tool_input_start = %+v", got)
 	}
 }
 
@@ -316,7 +580,7 @@ func TestProgressTailSuffixDiff(t *testing.T) {
 		t.Fatalf("unchanged tail emitted: %+v", got)
 	}
 	if got := progress("zzz"); len(got) != 0 {
-		t.Fatalf("non-extending tail emitted (Phase 0 suffix-diff rule): %+v", got)
+		t.Fatalf("non-extending tail emitted (suffix-diff rule): %+v", got)
 	}
 
 	// stdout and stderr are diffed independently: concatenated, a growing
@@ -361,7 +625,7 @@ func TestNormalizeToleratesMalformedParams(t *testing.T) {
 		zcodeproto.MethodInteractionProviderRuntimeHeadersCancelled,
 	}
 	for _, method := range methods {
-		for _, params := range []string{`"not an object"`, `42`, `[1,2]`, `null`, ``, `{"type":"turn.completed","payload":"nope"}`, `{"type":"tool.updated","payload":[]}`, `{"kind":7}`} {
+		for _, params := range []string{`"not an object"`, `42`, `[1,2]`, `null`, ``, `{"type":"turn.completed","payload":"nope"}`, `{"type":"tool.updated","payload":[]}`, `{"type":"model.streaming","payload":7}`, `{"type":"turn.failed","payload":{"error":"x"}}`, `{"kind":7}`} {
 			tracker := armedTracker(t)
 			func() {
 				defer func() {
@@ -389,26 +653,31 @@ func TestNoiseIsDropped(t *testing.T) {
 		tag string
 		n   notification
 	}{
-		{"PROVEN probe:39", notif(zcodeproto.MethodStartupStorageState, `{"phase":"waiting_for_lock"}`)},
-		{"PROVEN probe:39", notif(zcodeproto.MethodProcessResourceSample, `{"rss":1}`)},
-		{"PROVEN probe:39", notif(zcodeproto.MethodProcessMcpTelemetry, `{}`)},
+		{"PROVEN p1", notif(zcodeproto.MethodStartupStorageState, `{"phase":"waiting_for_lock"}`)},
+		{"PROVEN p1", notif(zcodeproto.MethodProcessMcpTelemetry, `{"kind":"process_start"}`)},
+		{"PROVEN p1", notif(zcodeproto.MethodV4TelemetryEvent, `{"kind":"turn.started","sourceCommandId":"minted-1"}`)},
+		{"STATIC sT", notif(zcodeproto.MethodProcessResourceSample, `{"rss":1}`)},
 		{"STATIC sT", notif(zcodeproto.MethodProcessMcpResourceSamples, `{}`)},
 		{"STATIC sT", notif(zcodeproto.MethodProcessToolExecResource, `{}`)},
 		{"STATIC sT", notif(zcodeproto.MethodProcessNetworkRequests, `{}`)},
 		{"STATIC sT", notif(zcodeproto.MethodPluginsOperationProgress, `{}`)},
 		{"STATIC Sg", notif("v4/desktop/anything", `{}`)},
-		{"STATIC zXt", sessionEvent("session.updated", "t-native", `{}`)},
+		{"PROVEN p1", sessionEvent("session.updated", "t-native", `{}`)},
+		{"PROVEN p5", sessionEvent("streamRecovery.updated", "t-native", `{"kind":"tool_result"}`)},
+		{"PROVEN p5", sessionEvent("permission.requested", "t-native", `{"requestId":"r1","toolCallId":"tc1"}`)},
+		{"PROVEN p5", sessionEvent("tool.updated", "t-native", `{"kind":"batch","toolCallIds":["tc1"],"successCount":1,"errorCount":0}`)},
+		{"PROVEN p5", sessionEvent("model.streaming", "t-native", `{"kind":"tool_input_delta","toolCallId":"tc1","delta":"{\"command\":\"date\"}"}`)},
+		{"PROVEN p5", sessionEvent("model.streaming", "t-native", `{"kind":"tool_input_end","toolCallId":"tc1"}`)},
+		{"PROVEN p5", sessionEvent("model.streaming", "t-native", `{"kind":"tool_call","toolCallId":"tc1","toolName":"Bash","input":{"command":"date"}}`)},
 		{"STATIC zXt", sessionEvent("checkpoint.created", "t-native", `{}`)},
 		{"STATIC zXt", sessionEvent("rewind.triggered", "t-native", `{}`)},
-		{"STATIC zXt", sessionEvent("streamRecovery.updated", "t-native", `{}`)},
 		{"STATIC zXt", sessionEvent("turn.steerQueued", "t-native", `{}`)},
 		{"STATIC zXt", sessionEvent("turn.steerDrained", "t-native", `{}`)},
 		{"STATIC zXt", sessionEvent("message.created", "t-native", `{}`)},
 		{"STATIC zXt", sessionEvent("part.started", "t-native", `{}`)},
 		{"STATIC zXt", sessionEvent("part.upserted", "t-native", `{}`)},
 		{"STATIC zXt", sessionEvent("part.removed", "t-native", `{}`)},
-		{"STATIC zXt", sessionEvent("permission.requested", "t-native", `{"toolCallId":"tc1"}`)},
-		{"STATIC Lhc/Xmc", notif(zcodeproto.MethodStateUpdated, `{"reason":"model_changed","patch":{}}`)},
+		{"PROVEN p7", notif(zcodeproto.MethodStateUpdated, `{"reason":"model_changed","patch":{}}`)},
 		{"STATIC Lhc/Xmc", notif(zcodeproto.MethodStateUpdated, `{"reason":"settings_updated"}`)},
 		{"STATIC Oai", notif(zcodeproto.MethodComputerUseOperationEvent, `{"kind":"heartbeat"}`)},
 	}
@@ -419,6 +688,10 @@ func TestNoiseIsDropped(t *testing.T) {
 	}
 	if tracker.currentTurn() != "minted-1" {
 		t.Fatal("noise settled the turn")
+	}
+	// The dropped tool_call was still remembered for the row that follows.
+	if got := normalize(tracker, sessionEvent("tool.updated", "t-native", `{"kind":"scheduled","toolCallId":"tc1","toolName":"Bash","inputOmitted":true,"inputRef":"model_stream"}`)); len(got) != 1 || got[0].Summary != "Run date" {
+		t.Fatalf("scheduled after tool_call = %+v", got)
 	}
 }
 
@@ -481,6 +754,25 @@ func TestTurnLifecycleDedupesAcrossThreeSignals(t *testing.T) {
 	}
 }
 
+// The operation-event completion arrives BEFORE session/event turn.completed
+// (PROVEN order in every fixture) and must not settle the turn, or a cancelled
+// turn reads as completed and a failed one loses its error.
+func TestOperationEventCompletionNeverSettlesTheTurn(t *testing.T) {
+	for _, kind := range []string{"turn-completed", "turn-failed"} {
+		tracker := armedTracker(t)
+		if got := normalize(tracker, notif(zcodeproto.MethodComputerUseOperationEvent, `{"kind":"`+kind+`","turnId":"t-native"}`)); len(got) != 0 {
+			t.Fatalf("%s emitted %+v", kind, got)
+		}
+		if tracker.currentTurn() != "minted-1" {
+			t.Fatalf("%s settled the turn", kind)
+		}
+		completed := normalize(tracker, sessionEvent("turn.completed", "t-native", `{"resultType":"cancelled","response":""}`))
+		if len(completed) != 1 || completed[0].TurnState != domain.TurnStateInterrupted {
+			t.Fatalf("session/event after %s = %+v", kind, completed)
+		}
+	}
+}
+
 func TestProviderInitiatedTurnGetsANamespacedID(t *testing.T) {
 	tracker := newTurnTracker()
 	events := normalize(tracker, notif(zcodeproto.MethodComputerUseOperationEvent, `{"kind":"turn-started","turnId":"t-goal"}`))
@@ -490,5 +782,10 @@ func TestProviderInitiatedTurnGetsANamespacedID(t *testing.T) {
 	// A bare prompt_started with nothing prepared names nothing: dropped.
 	if got := normalize(newTurnTracker(), notif(zcodeproto.MethodStateUpdated, `{"reason":"prompt_started"}`)); len(got) != 0 {
 		t.Fatalf("uncorrelated prompt_started emitted %+v", got)
+	}
+	// turn.started's inputId echo names the minted id when nothing is armed
+	// (a replayed start after a reconnect), so the turn correlates.
+	if got := normalize(newTurnTracker(), sessionEvent("turn.started", "t-native", `{"inputId":"durable-uuid","turnNumber":1}`)); len(got) != 1 || got[0].ProviderTurnID != "durable-uuid" || got[0].NativeTurnID != "t-native" {
+		t.Fatalf("turn.started with an inputId echo = %+v", got)
 	}
 }

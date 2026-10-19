@@ -37,10 +37,11 @@ func sessionMode(mode ports.PermissionMode, readOnly bool) (string, error) {
 	}
 }
 
-// validateStart is the driver-side guard of DESIGN 2.4: until
-// interaction/requestPermission is proven live (U5), every mode that relies on
-// an approval channel is refused with the typed sentinel, wrapped exactly as
-// kimiacp does so callers branch with errors.Is.
+// validateStart refuses what the provider would refuse later and worse: a
+// relative --cwd and a read-only request (no provider-enforced sandbox). Every
+// permission mode is admitted: interaction/requestPermission is PROVEN under
+// mode edit (p5-approval-allow.ndjson), so the Phase 0 bypass-only guard is
+// gone.
 func validateStart(workspace string, mode ports.PermissionMode, readOnly bool) error {
 	if !filepath.IsAbs(workspace) {
 		// app-server validates --cwd (`zdi`) and a relative path would resolve
@@ -48,18 +49,14 @@ func validateStart(workspace string, mode ports.PermissionMode, readOnly bool) e
 		// wrong tree.
 		return fmt.Errorf("workspace path must be absolute, got %q", workspace)
 	}
-	if _, err := sessionMode(mode, readOnly); err != nil {
-		return err
-	}
-	if ports.NormalizePermissionMode(mode) != ports.PermissionModeBypassPermissions {
-		return fmt.Errorf("%w: zcode chat requires bypass-permissions until interaction/requestPermission is proven (U5)",
-			ports.ErrChatPermissionModeUnsupported)
-	}
-	return nil
+	_, err := sessionMode(mode, readOnly)
+	return err
 }
 
 // decisionKind classifies a provider permission option by its response object
-// (DESIGN 4.2; INFERENCE on the mapping, U5).
+// (PROVEN option set, p5-approval-allow.ndjson: allow_once {decision:allow},
+// allow_always {decision:allow, permissionUpdates:[addRules]}, deny
+// {decision:deny}).
 func decisionKind(resp zcodeproto.PermissionResponse) ports.ChatDecisionKind {
 	always := len(resp.PermissionUpdates) > 0 && strings.TrimSpace(string(resp.PermissionUpdates)) != "null"
 	switch resp.Decision {
@@ -103,8 +100,9 @@ func decisionOptions(options []zcodeproto.PermissionOption) []ports.ChatDecision
 }
 
 // inputRequestFrom turns interaction/requestUserInput into AO's form request
-// (DESIGN 4.2; STATIC, U6). The schema is a flat object keyed by each question's
-// header (or question text), with the offered values as an enum.
+// (DESIGN 4.2; question shape PROVEN, p6-user-input.ndjson). The schema is a
+// flat object keyed by each question's header (or question text), with the
+// offered values as an enum.
 func inputRequestFrom(params zcodeproto.RequestUserInputParams) *ports.ChatInputRequest {
 	message := params.Prompt
 	if message == "" && len(params.Questions) > 0 {

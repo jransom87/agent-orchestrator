@@ -53,13 +53,17 @@ func (p *fakePlugin) AugmentRuntimeLaunchEnv(_ map[string]string, dataDir string
 	p.augments = append(p.augments, augmentCall{dataDir: dataDir, sessionID: sessionID})
 }
 
-// testSnapshot is a STATIC-shaped session snapshot used as the canned
+// testSnapshot is a session snapshot in the PROVEN shape of the p1/p7
+// fixtures (two models with reasoning levels, current with
+// options.reasoningLevel, idle projection), used as the canned
 // session/create, session/resume and session/read result.
-const testSnapshot = `{"protocol":{},"session":{"sessionId":"sess-1","mode":"yolo"},` +
-	`"settings":{"model":{"current":{"providerId":"account:zai-individual-coding-plan","modelId":"GLM-5.3"},` +
-	`"available":[{"ref":{"providerId":"account:zai-individual-coding-plan","modelId":"GLM-5.3"},"label":"GLM 5.3","contextWindow":200000,"reasoning":{"levels":["low","high"]}},` +
-	`{"ref":{"providerId":"account:zai-individual-coding-plan","modelId":"GLM-5.3-Flash"},"label":"GLM 5.3 Flash"}]}},` +
-	`"projection":{"contextUsed":1200,"contextWindow":200000},"runtime":{"pendingRequestIds":[]},"messages":[]}`
+const testSnapshot = `{"protocol":{"name":"ZCode Protocol","version":1},"session":{"sessionId":"sess-1","mode":"build","model":{"providerId":"zai-api-ao","modelId":"GLM-5.3"}},` +
+	`"settings":{"mode":{"current":"edit"},"model":{"available":[` +
+	`{"ref":{"providerId":"zai-api-ao","modelId":"GLM-5.3"},"label":"GLM-5.3","providerLabel":"Z.ai Coding Plan (AO)","contextWindow":200000,"maxOutputTokens":128000,"reasoning":{"levels":[{"value":"low","label":"low"},{"value":"high","label":"high"},{"value":"max","label":"max"}],"defaultLevel":"max"}},` +
+	`{"ref":{"providerId":"zai-api-ao","modelId":"GLM-5.3-Flash"},"label":"GLM-5.3-Flash","providerLabel":"Z.ai Coding Plan (AO)","contextWindow":200000,"reasoning":{"levels":[{"value":"low","label":"low"},{"value":"high","label":"high"}],"defaultLevel":"high"}}],` +
+	`"current":{"providerId":"zai-api-ao","modelId":"GLM-5.3","options":{"reasoningLevel":"max"}},"lastUsed":{"providerId":"zai-api-ao","modelId":"GLM-5.3"}},"permission":{"mode":"edit"}},` +
+	`"projection":{"activeToolCalls":[],"backgroundJobs":[],"contextUsed":1200,"contextWindow":200000,"pendingPermissions":[],"status":"idle","turnCount":0},` +
+	`"runtime":{"eventSeq":0,"pendingRequestIds":[],"stateRevision":0},"messages":[]}`
 
 // scriptedServer stands in for `zcode app-server` over in-memory pipes. It
 // answers client requests from a canned table, lets a test push notifications
@@ -440,12 +444,16 @@ func paramsMap(t *testing.T, f frame) map[string]any {
 
 // --- replay loader -----------------------------------------------------------
 
-// replayLine is one direction-tagged line of a testdata/*.ndjson capture:
-// "out" is what the client wrote, "in" what the server wrote.
+// replayLine is one direction-tagged line of a testdata/*.ndjson fixture:
+// "out" is what the client wrote, "in" what the server wrote. Fixtures are
+// extracted from the redacted Phase 1 captures (probes/captures/); Source
+// names the capture file and line each frame came from, and a leading "meta"
+// line describes the run and the trims applied.
 type replayLine struct {
-	Dir   string `json:"dir"`
-	Frame frame  `json:"frame"`
-	Note  string `json:"note"`
+	Dir    string `json:"dir"`
+	Frame  frame  `json:"frame"`
+	Note   string `json:"note"`
+	Source string `json:"source"`
 }
 
 func loadReplay(t *testing.T, name string) []replayLine {
@@ -463,22 +471,85 @@ func loadReplay(t *testing.T, name string) []replayLine {
 		if err := json.Unmarshal(raw, &line); err != nil {
 			t.Fatalf("%s line %d: %v", name, i+1, err)
 		}
+		if line.Dir == "meta" {
+			continue
+		}
 		if line.Dir != "in" && line.Dir != "out" {
 			t.Fatalf("%s line %d: dir %q", name, i+1, line.Dir)
+		}
+		if line.Source == "" {
+			t.Fatalf("%s line %d: no capture source", name, i+1)
 		}
 		lines = append(lines, line)
 	}
 	return lines
 }
 
+// fixtureNames lists every capture-derived fixture.
+func fixtureNames(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir("testdata")
+	if err != nil {
+		t.Fatalf("read testdata: %v", err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".ndjson") {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+// fixtureNotifications returns the server->client notifications of a fixture,
+// in wire order, for the normalizer.
+func fixtureNotifications(t *testing.T, name string) []notification {
+	t.Helper()
+	var out []notification
+	for _, line := range loadReplay(t, name) {
+		if line.Dir != "in" || line.Frame.ID != nil || line.Frame.Method == "" {
+			continue
+		}
+		out = append(out, notification{Method: line.Frame.Method, Params: line.Frame.Params})
+	}
+	return out
+}
+
+// fixtureFrame returns the first fixture frame matching pred.
+func fixtureFrame(t *testing.T, name string, pred func(replayLine) bool) frame {
+	t.Helper()
+	for _, line := range loadReplay(t, name) {
+		if pred(line) {
+			return line.Frame
+		}
+	}
+	t.Fatalf("%s: no frame matches", name)
+	return frame{}
+}
+
+// fixtureResult returns the result body of the fixture's response to the
+// client request with the given numeric id.
+func fixtureResult(t *testing.T, name string, id int64) string {
+	t.Helper()
+	f := fixtureFrame(t, name, func(line replayLine) bool {
+		return line.Dir == "in" && line.Frame.Method == "" && line.Frame.ID != nil && rawID(*line.Frame.ID) == strconv.FormatInt(id, 10) && len(line.Frame.Result) > 0
+	})
+	return string(f.Result)
+}
+
 func isRequest(f frame) bool { return f.ID != nil && f.Method != "" }
 
-// replay drives the onRequest/awaitReply hooks from a capture: every "out"
-// request becomes a handler that writes the "in" lines that followed it, holds
-// the response until each "out" reply to a server request has arrived, and
-// checks that reply byte-for-byte against the capture.
+// replay drives the onRequest/awaitReply hooks from a fixture: every "out"
+// request becomes one group of the "in" lines that followed it. The groups of
+// one method are played in fixture order, one per client request (the p1
+// fixture has three session/send groups: the proven turn, then the two
+// back-to-back sends of the -32010 probe). A group holds the response until
+// each "out" reply to a server request has arrived and checks that reply
+// against the capture: results byte-for-byte, refusals by code.
 func (s *scriptedServer) replay(lines []replayLine) {
 	s.t.Helper()
+	groups := map[string][][]replayLine{}
+	var order []string
 	for i := 0; i < len(lines); i++ {
 		if lines[i].Dir != "out" || !isRequest(lines[i].Frame) {
 			continue
@@ -488,9 +559,26 @@ func (s *scriptedServer) replay(lines []replayLine) {
 		for end < len(lines) && !(lines[end].Dir == "out" && isRequest(lines[end].Frame)) {
 			end++
 		}
-		group := lines[start:end]
-		s.onRequest(lines[i].Frame.Method, func(id, _ json.RawMessage) {
-			for _, line := range group {
+		method := lines[i].Frame.Method
+		if _, seen := groups[method]; !seen {
+			order = append(order, method)
+		}
+		groups[method] = append(groups[method], lines[start:end])
+		i = end - 1
+	}
+	for _, method := range order {
+		queue := groups[method]
+		var mu sync.Mutex
+		next := 0
+		s.onRequest(method, func(id, _ json.RawMessage) {
+			mu.Lock()
+			index := next
+			if index >= len(queue) {
+				index = len(queue) - 1
+			}
+			next++
+			mu.Unlock()
+			for _, line := range queue[index] {
 				switch {
 				case line.Dir == "in" && isRequest(line.Frame):
 					s.push(marshalFrame(s.t, line.Frame))
@@ -503,13 +591,17 @@ func (s *scriptedServer) replay(lines []replayLine) {
 					s.push(marshalFrame(s.t, line.Frame))
 				case line.Dir == "out" && line.Frame.ID != nil && line.Frame.Method == "":
 					got := s.awaitReply(rawID(*line.Frame.ID))
-					if !jsonEqual(got.Result, line.Frame.Result) {
+					switch {
+					case line.Frame.Error != nil:
+						if got.Error == nil || got.Error.Code != line.Frame.Error.Code {
+							s.t.Errorf("reply to %s = %+v, capture refused with %d", rawID(*line.Frame.ID), got, line.Frame.Error.Code)
+						}
+					case !jsonEqual(got.Result, line.Frame.Result):
 						s.t.Errorf("reply to %s = %s, capture has %s", rawID(*line.Frame.ID), got.Result, line.Frame.Result)
 					}
 				}
 			}
 		})
-		i = end - 1
 	}
 }
 
@@ -537,9 +629,11 @@ func jsonEqual(a, b json.RawMessage) bool {
 
 func TestStartCreatesSessionAnswersRuntimePreferencesAndSubscribes(t *testing.T) {
 	d, srv := newTestDriver(t)
-	srv.replay(loadReplay(t, "proven-create-send.ndjson"))
+	srv.replay(loadReplay(t, "p1-create-send-complete.ndjson"))
 
-	conv, err := d.Start(context.Background(), startConfig(t))
+	cfg := startConfig(t)
+	cfg.Permissions = ports.PermissionModeDefault
+	conv, err := d.Start(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -552,6 +646,14 @@ func TestStartCreatesSessionAnswersRuntimePreferencesAndSubscribes(t *testing.T)
 	}
 	if _, ok := params["model"]; ok {
 		t.Fatalf("session/create must omit model (HANDOFF.md:57-60): %s", create.Params)
+	}
+	// The PROVEN param set of the capture, no more: mode edit for the default
+	// permission mode, no title generation, no thoughtLevel (STATIC).
+	if params["mode"] != "edit" || params["titleGenerationEnabled"] != false {
+		t.Fatalf("session/create params = %s, want mode edit and titleGenerationEnabled false", create.Params)
+	}
+	if _, ok := params["thoughtLevel"]; ok {
+		t.Fatalf("session/create carries the STATIC thoughtLevel: %s", create.Params)
 	}
 	reply := srv.awaitReply("server-1")
 	if want := `{"nativeSearchEnhancementsEnabled":true,"askUserQuestionAutoResolutionEnabled":false}`; string(reply.Result) != want {
@@ -573,8 +675,12 @@ func TestStartCreatesSessionAnswersRuntimePreferencesAndSubscribes(t *testing.T)
 	if replyIndex < 0 || createIndex < 0 || replyIndex < createIndex {
 		t.Fatalf("expected create request before preferences reply, got frames %+v", frames)
 	}
-	if got := conv.ProviderConversationID(); got != "sess-proven-1" {
+	if got := conv.ProviderConversationID(); got != "sess_29fed201-ab0a-4113-a705-691ede0a4560" {
 		t.Fatalf("ProviderConversationID = %q, want the params.sessionId of the preferences request", got)
+	}
+	// The official-MCP auth storm is declined, never left pending.
+	if decline := srv.awaitReply("server-2"); decline.Error == nil || decline.Error.Code != zcodeproto.CodeClientDeclined {
+		t.Fatalf("requestOfficialMcpAuthHeaders reply = %+v, want -32001", decline)
 	}
 	subscribe := srv.awaitRequest(zcodeproto.MethodSessionSubscribe)
 	if got := paramsMap(t, subscribe)["deliveryKind"]; got != deliveryKind {
@@ -584,17 +690,223 @@ func TestStartCreatesSessionAnswersRuntimePreferencesAndSubscribes(t *testing.T)
 		t.Fatal("Start must not send session/resume")
 	}
 
-	// The proven send: prompt_started precedes the ack and maps to the minted id.
+	// The proven turn: prompt_started precedes the ack and maps to the minted
+	// id; the native id, the reasoning row, the streamed text, the committed
+	// response, the usage and the settlement follow in capture order.
 	c := conv.(*conversation)
-	id := sendTurn(t, c, "Reply with exactly the word OK and nothing else.")
+	models, err := c.ListModels(context.Background())
+	if err != nil || len(models) != 2 || models[0].ID != "zai-api-ao/GLM-5.3" || !models[0].Default {
+		t.Fatalf("ListModels from the create snapshot = %+v, %v", models, err)
+	}
+	id := sendTurn(t, c, "Reply with exactly one word: OK")
 	send := srv.awaitRequest(zcodeproto.MethodSessionSend)
-	if got := paramsMap(t, send)["content"]; got != "Reply with exactly the word OK and nothing else." {
+	if got := paramsMap(t, send)["content"]; got != "Reply with exactly one word: OK" {
 		t.Fatalf("send content = %v", got)
 	}
 	started := nextEvent(t, conv.Events(), ports.ChatEventTurnStarted)
 	if started.ProviderTurnID != id {
 		t.Fatalf("turn.started id = %q, want minted %q", started.ProviderTurnID, id)
 	}
+	reasoning := nextEvent(t, conv.Events(), ports.ChatEventActivityStarted)
+	if reasoning.ActivityKind != domain.ActivityKindReasoning || reasoning.ProviderTurnID != id {
+		t.Fatalf("reasoning row = %+v", reasoning)
+	}
+	if delta := nextEvent(t, conv.Events(), ports.ChatEventReasoningDelta); delta.ProviderItemID != reasoning.ProviderItemID {
+		t.Fatalf("reasoning.delta = %+v", delta)
+	}
+	var text string
+	for ev := nextEvent(t, conv.Events(), ports.ChatEventMessageDelta); ; ev = nextEvent(t, conv.Events(), ports.ChatEventMessageDelta) {
+		text += ev.Delta
+		if text == "OK" {
+			break
+		}
+	}
+	message := nextEvent(t, conv.Events(), ports.ChatEventMessageCompleted)
+	if message.Text != "OK" || message.ProviderTurnID != id {
+		t.Fatalf("message.completed = %+v", message)
+	}
+	if usage := nextEvent(t, conv.Events(), ports.ChatEventUsage); usage.Usage == nil || usage.Usage.InputTokens != 270058 || usage.Usage.CachedTokens != 320 {
+		t.Fatalf("usage = %+v", usage.Usage)
+	}
+	completed := nextEvent(t, conv.Events(), ports.ChatEventTurnCompleted)
+	if completed.ProviderTurnID != id || completed.TurnState != domain.TurnStateCompleted || completed.NativeTurnID != "turn_be5eae50-2260-43ca-bf5d-1daa514d20e1" {
+		t.Fatalf("turn.completed = %+v", completed)
+	}
+	if got := drainEvents(conv.Events(), 150*time.Millisecond); countKind(got, ports.ChatEventTurnCompleted) != 0 {
+		t.Fatalf("prompt_completed settled the turn a second time: %+v", got)
+	}
+}
+
+// promptConflict is the captured -32010 refusal of a session/send written
+// while a prompt was running (p1-create-send-complete.ndjson). AO's own
+// SendTurn guard means the driver never writes that second send itself; the
+// frame is replayed as the scripted answer to the one send it does write.
+func promptConflict(t *testing.T) *rpcError {
+	t.Helper()
+	f := fixtureFrame(t, "p1-create-send-complete.ndjson", func(line replayLine) bool {
+		return line.Dir == "in" && line.Frame.Error != nil && line.Frame.Error.Code == zcodeproto.CodePromptConflict
+	})
+	return f.Error
+}
+
+func TestCreateCarriesMCPServersInTheProvenShape(t *testing.T) {
+	d, srv := newTestDriver(t)
+	cfg := startConfig(t)
+	cfg.MCPServers = []ports.ChatMCPServerConfig{
+		{Name: "ao", Type: "stdio", Command: "/tmp/ao-zcode-dev", Args: []string{"mcp"}, Env: map[string]string{"AO_DATA_DIR": "/tmp/ao-v3-data"}},
+		{Name: "remote", Type: "http", URL: "https://example.invalid/mcp"},
+	}
+	conv, err := d.Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = conv.Close() }()
+	create := srv.awaitRequest(zcodeproto.MethodSessionCreate)
+	var params struct {
+		MCPServers []zcodeproto.MCPServerConfig `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(create.Params, &params); err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	// The captured create (p9-usage-read-mcp.ndjson) is the reference shape.
+	want := fixtureFrame(t, "p9-usage-read-mcp.ndjson", func(line replayLine) bool {
+		return line.Dir == "out" && line.Frame.Method == zcodeproto.MethodSessionCreate
+	})
+	var captured struct {
+		MCPServers []zcodeproto.MCPServerConfig `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(want.Params, &captured); err != nil {
+		t.Fatalf("captured params: %v", err)
+	}
+	if !reflect.DeepEqual(params.MCPServers, captured.MCPServers) {
+		t.Fatalf("mcpServers = %+v, want the captured %+v (http servers skipped)", params.MCPServers, captured.MCPServers)
+	}
+
+	// A server with no args and no env still sends both keys as empty arrays:
+	// omitting them is refused live with -32602 "mcpServers.0: Invalid input".
+	d2, srv2 := newTestDriver(t)
+	cfg2 := startConfig(t)
+	cfg2.MCPServers = []ports.ChatMCPServerConfig{{Name: "bare", Type: "stdio", Command: "/usr/bin/true"}}
+	conv2, err := d2.Start(context.Background(), cfg2)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = conv2.Close() }()
+	bare := srv2.awaitRequest(zcodeproto.MethodSessionCreate)
+	if !strings.Contains(string(bare.Params), `"mcpServers":[{"name":"bare","command":"/usr/bin/true","args":[],"env":[],"isolation":"session"}]`) {
+		t.Fatalf("bare server params = %s", bare.Params)
+	}
+}
+
+func TestTurnFailedCarriesTheProviderAttribution(t *testing.T) {
+	conv, srv := startConversation(t)
+	srv.replay(loadReplay(t, "p1-turn-failed-provider.ndjson"))
+	id := sendTurn(t, conv, "Reply with exactly one word: OK")
+	nextEvent(t, conv.Events(), ports.ChatEventTurnStarted)
+	completed := nextEvent(t, conv.Events(), ports.ChatEventTurnCompleted)
+	if completed.ProviderTurnID != id || completed.TurnState != domain.TurnStateFailed || completed.Err == nil {
+		t.Fatalf("turn.completed = %+v", completed)
+	}
+	text := completed.Err.Error()
+	for _, want := range []string{"[1113]", "Insufficient balance", "provider=zai-api-ao", "status=429", "retryable=false"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("failure %q lacks %q", text, want)
+		}
+	}
+	if errors.Is(completed.Err, ports.ErrChatAuthRequired) {
+		t.Fatal("a provider quota failure read as an auth failure")
+	}
+	if got := drainEvents(conv.Events(), 150*time.Millisecond); countKind(got, ports.ChatEventTurnCompleted) != 0 {
+		t.Fatalf("turn-failed/prompt_failed settled the turn again: %+v", got)
+	}
+}
+
+// TestZcodeHibernateStopsAppServerAndNativeResumesSession is the zcode analog
+// of the codex hibernate test and runs on Windows CI (go.yml), so it is pure
+// pipes: nothing execs, no POSIX path assumptions.
+func TestZcodeHibernateStopsAppServerAndNativeResumesSession(t *testing.T) {
+	d, firstServer := newTestDriver(t)
+	cfg := startConfig(t)
+	first, err := d.Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := first.ProviderConversationID()
+	provider := first.(*conversation)
+	sendTurn(t, provider, "first turn")
+	completeTurn(t, provider, firstServer)
+
+	hibernator := first.(ports.ChatProviderHibernator)
+	if can, err := hibernator.CanHibernate(context.Background()); err != nil || !can {
+		t.Fatalf("CanHibernate = %v, %v; want true on an idle projection", can, err)
+	}
+	stopped := false
+	provider.proc.terminate = func() error {
+		stopped = true
+		return provider.proc.stop()
+	}
+	if err := hibernator.Hibernate(); err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Fatal("hibernate detached the controller but left app-server alive")
+	}
+
+	replacement, server := newTestDriver(t)
+	resumed, err := replacement.Resume(context.Background(), ports.ChatResumeConfig{
+		SessionID: cfg.SessionID, DataDir: t.TempDir(), WorkspacePath: cfg.WorkspacePath,
+		ProviderConversationID: sessionID, Permissions: cfg.Permissions, HasPriorTurns: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resumed.Close() }()
+	if resumed.ProviderConversationID() != sessionID || !server.sentMethod(zcodeproto.MethodSessionResume) || server.sentMethod(zcodeproto.MethodSessionCreate) {
+		t.Fatal("replacement app-server did not resume the same zcode session")
+	}
+	sendTurn(t, resumed.(*conversation), "second turn")
+	send := server.awaitRequest(zcodeproto.MethodSessionSend)
+	if got := paramsMap(t, send)["sessionId"]; got != sessionID {
+		t.Fatalf("second turn targeted %v, want %q", got, sessionID)
+	}
+}
+
+func TestCanHibernateRefusesWhileTheProviderIsBusy(t *testing.T) {
+	cases := []struct {
+		name     string
+		snapshot string
+	}{
+		{"running projection", strings.Replace(testSnapshot, `"status":"idle"`, `"status":"running"`, 1)},
+		{"active tool call", strings.Replace(testSnapshot, `"activeToolCalls":[]`, `"activeToolCalls":[{"toolCallId":"tc1"}]`, 1)},
+		{"background job", strings.Replace(testSnapshot, `"backgroundJobs":[]`, `"backgroundJobs":[{"id":"j1"}]`, 1)},
+		{"pending permission", strings.Replace(testSnapshot, `"pendingPermissions":[]`, `"pendingPermissions":[{"requestId":"r1"}]`, 1)},
+		{"pending request", strings.Replace(testSnapshot, `"pendingRequestIds":[]`, `"pendingRequestIds":["r1"]`, 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conv, srv := startConversation(t)
+			srv.respondTo(zcodeproto.MethodSessionRead, tc.snapshot)
+			if can, err := conv.CanHibernate(context.Background()); err != nil || can {
+				t.Fatalf("CanHibernate = %v, %v; want false", can, err)
+			}
+		})
+	}
+	t.Run("read failure leaves the provider running", func(t *testing.T) {
+		conv, srv := startConversation(t)
+		srv.replyError(zcodeproto.MethodSessionRead, zcodeproto.CodeInternal, "boom")
+		if can, err := conv.CanHibernate(context.Background()); err == nil || can {
+			t.Fatalf("CanHibernate = %v, %v; want an error", can, err)
+		}
+	})
+	t.Run("open turn", func(t *testing.T) {
+		conv, srv := startConversation(t)
+		sendTurn(t, conv, "hello")
+		srv.push(`{"method":"state.updated","params":{"reason":"prompt_started"}}`)
+		nextEvent(t, conv.Events(), ports.ChatEventTurnStarted)
+		if can, err := conv.CanHibernate(context.Background()); err != nil || can {
+			t.Fatalf("CanHibernate = %v, %v; want false with a turn open", can, err)
+		}
+	})
 }
 
 // storePinningPlugin is the real zcode plugin for AugmentRuntimeLaunchEnv with
@@ -707,8 +1019,22 @@ func TestProbeReportsCapabilitiesAndHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
-	if !caps.Has(ports.ChatCapabilityInterrupt) || !caps.Has(ports.ChatCapabilityResume) {
-		t.Fatalf("capabilities = %v", caps)
+	// Exactly the Phase 1-proven set (DESIGN 8, "2b"): nothing STATIC, and
+	// nothing proven left out.
+	want := ports.ChatCapabilities{
+		ports.ChatCapabilityStreaming: true, ports.ChatCapabilityApprovals: true, ports.ChatCapabilityInterrupt: true,
+		ports.ChatCapabilityResume: true, ports.ChatCapabilityTools: true, ports.ChatCapabilityInteractive: true,
+		ports.ChatCapabilityUsage: true, ports.ChatCapabilityModels: true, ports.ChatCapabilityHistory: true,
+	}
+	if !reflect.DeepEqual(caps, want) {
+		t.Fatalf("capabilities = %v, want %v", caps, want)
+	}
+	if missing := ports.MissingProductionCapabilities(caps); len(missing) != 0 {
+		t.Fatalf("missing production capabilities: %v", missing)
+	}
+	conv, _ := startConversation(t)
+	if !reflect.DeepEqual(conv.Capabilities(), want) {
+		t.Fatalf("conversation capabilities = %v", conv.Capabilities())
 	}
 }
 
@@ -753,7 +1079,8 @@ func TestSendTurnRejectsEmptyTextAndBusyConversation(t *testing.T) {
 
 func TestPromptConflictFailsTheDeferredStart(t *testing.T) {
 	conv, srv := startConversation(t)
-	srv.replyError(zcodeproto.MethodSessionSend, zcodeproto.CodePromptConflict, "A prompt is already running for this session")
+	conflict := promptConflict(t)
+	srv.replyError(zcodeproto.MethodSessionSend, conflict.Code, conflict.Message)
 
 	ref, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "hello"})
 	if err != nil {
@@ -1086,7 +1413,7 @@ func TestReconnectSkipsCreateResumeAndSubscribe(t *testing.T) {
 
 // busySnapshot is testSnapshot with the app-server reporting a running turn.
 var busySnapshot = strings.Replace(testSnapshot,
-	`"runtime":{"pendingRequestIds":[]}`, `"runtime":{"activeTurnId":"t-native","pendingRequestIds":[]}`, 1)
+	`"pendingRequestIds":[]`, `"activeTurnId":"t-native","pendingRequestIds":[]`, 1)
 
 func reconnectBusy(t *testing.T) (*conversation, *scriptedServer) {
 	t.Helper()
